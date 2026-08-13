@@ -56,7 +56,7 @@ for r in csv.DictReader(open('coe_history_AAPL_annual.csv')):
     COE[int(r['yr'])] = float(r['coe_real_mean']) / 100.0
 
 DEFL = {}
-_rows = list(csv.reader(open('AAPL_restated.csv')))
+_rows = list(csv.reader(open('../AAPL_restated.csv')))
 _hdr = _rows[0]
 for r in _rows:
     if r[0].startswith('CPI deflator'):

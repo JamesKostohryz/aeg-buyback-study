@@ -259,13 +259,77 @@ OUT.append((_entry_at(_rs - 0.0001, _yrs) > 0 > _entry_at(_rs + 0.0001, _yrs),
 OUT.append((_rs > R, "break-even sits ABOVE the engine rate, so the headline sign is positive",
             _rs, R, "/yr"))
 
+# ========== 5c. THE EARNINGS-TIMING DECOMPOSITION (added 2026-08-13)
+# Rebuilt here from the module against the independently reconstructed share flows above, and
+# every claim the report makes about it is re-derived rather than read back.
+import timing_decomposition as _td
+
+_td_est = _td.build_estimators(_epsr, window=range(2013, 2026))
+_td_band = _td.decomposition_band(_ret, _epsr, _pxr, R, _yrs, _td_est)
+
+# (1) THE IDENTITY. decision + timing must equal the entry effect, per tranche and cumulative,
+# under EVERY estimator. This is the whole basis of the measure: if it does not close, the split
+# is an adjustment to the published number rather than a decomposition of it.
+for _n, _d in _td_band.items():
+    for _t in _yrs:
+        _r = _d["rows"][_t]
+        chk(f"  timing identity {_n} FY{_t}", _r["decision"] + _r["timing"], _r["entry"], 1e-9, "$m")
+    chk(f"  timing identity {_n}, cumulative", _d["decision"] + _d["timing"], _d["entry"], 1e-6, "$m")
+
+# (2) THE PUBLISHED ENTRY EFFECT MUST NOT MOVE. The decomposition is a split, not an adjustment,
+# so every estimator must reproduce the same entry total as this file's own section 5b arithmetic.
+for _n, _d in _td_band.items():
+    chk(f"  entry effect unmoved under {_n}", _d["entry"], _entry_at(R, _yrs), 1e-6, "$m")
+
+# (3) TWO INDEPENDENT ROUTES TO THE SYMMETRIC READING. The log-linear fit assumes one constant
+# growth rate; the centred geometric mean assumes no functional form at all. If they disagree
+# materially the symmetric reading is not robust and must not be presented as primary.
+_ll, _c3 = _td_band["loglinear"]["decision"], _td_band["centered3"]["decision"]
+OUT.append((abs(_ll - _c3) / abs(_ll) < 0.12,
+            "symmetric reading agrees across two independent estimators (within 12%)",
+            _ll, _c3, "$m"))
+
+# (4) THE FAMILY SPLIT IS REAL AND IS THE PUBLISHED FINDING. Every symmetric estimator must put
+# the decision component positive with its break-even ABOVE the engine rate; every backward-looking
+# one must put it negative with its break-even BELOW. If either family stops being internally
+# consistent the report's framing is wrong, and this fails rather than passing quietly.
+_sym = [_td_band[n] for n in _td.SYMMETRIC_ESTIMATORS]
+_bwd = [_td_band[n] for n in _td.BACKWARD_ESTIMATORS]
+OUT.append((all(d["decision"] > 0 and d["break_even"] > R for d in _sym),
+            "every SYMMETRIC estimator: decision positive, break-even above engine rate",
+            min(d["decision"] for d in _sym), min(d["break_even"] for d in _sym) - R, "$m / rate"))
+OUT.append((all(d["decision"] < 0 and d["break_even"] < R for d in _bwd),
+            "every BACKWARD estimator: decision negative, break-even below engine rate",
+            max(d["decision"] for d in _bwd), max(d["break_even"] for d in _bwd) - R, "$m / rate"))
+
+# (5) THE TIMING COMPONENT IS RATE-FREE. Recomputing it at a wildly different capitalization rate
+# must change nothing. This is the formal statement of "rate-agnostic by construction".
+_alt = _td.decompose(_ret, _epsr, _pxr, R * 3.0, _yrs, _td_est["loglinear"])
+chk("timing component is invariant to the cost of equity (rate-agnostic)",
+    _alt["timing"], _td_band["loglinear"]["timing"], 1e-6, "$m")
+
+# (6) The decision break-even is a closed-form root: the decision component must be zero at it.
+for _n in ("loglinear", "normalizer4"):
+    _d = _td_band[_n]
+    _z = sum(_ret[t] * (_td_est[_n](t + 1) - _d["break_even"] * _pxr[t]) for t in _yrs)
+    chk(f"  decision component is zero at its own break-even, {_n}", _z, 0.0, 1e-6, "$m")
+
+# (7) The claim that Apple's FY2021 jump did NOT revert - the stated reason the symmetric family
+# is primary. The report asserts it as fact, so it is tested as fact.
+OUT.append((_epsr[2025] > _epsr[2021] > _epsr[2020] * 1.4,
+            "FY2021 earnings jump persisted through FY2025 (did not revert)",
+            _epsr[2021], _epsr[2025], "$/sh"))
+
+_dep_p = _td.timing_dependence(_td_band["loglinear"]["entry"], _td_band["loglinear"]["timing"])
+_dep_a = _td.timing_dependence(_td_band["normalizer4"]["entry"], _td_band["normalizer4"]["timing"])
+
 # ================================================ 6. AGAINST THE PUBLISHED HTML
 # Inline expected-value comments (# 26.6, # 3.8, # 125.0 and the rest) were
 # removed 2026-08-12. They were written before the debt correction of
 # 2026-08-09 and never updated, so they disagreed with figures that were
 # correct. An expected value written in a comment is an assertion that nothing
 # tests; where a check has an expected value it belongs in the check.
-TXT = html.unescape(re.sub(r'<[^>]+>', ' ', open('Buyback-Study-AAPL.html').read()))
+TXT = html.unescape(re.sub(r'<[^>]+>', ' ', open('../Buyback-Study-AAPL.html').read()))
 TXT = re.sub(r'\s+', ' ', TXT)
 
 
@@ -300,6 +364,15 @@ present(f"reduced the count by {_net_t:,.0f} million")
 present(f"{100*sum(_iss.values())/_ret_t:.1f} percent of gross retirement")
 present(f"real cost of equity of {100*_rs:.2f} percent")
 present(f"{10000*(_rs-R):.0f} basis points")
+
+# the earnings-timing decomposition, as published
+present(f"fitted real rate of {100*_td_est['loglinear'].growth:.2f} percent a year")
+present(f"timing accounts for {100*_dep_p:.0f} percent of the headline")
+present(f"timing component is {100*_dep_a:.0f} percent of the headline")
+present(f"put the price decision between {min(d['decision'] for d in _sym)/1000:+,.2f}")
+present(f"put it between {min(d['decision'] for d in _bwd)/1000:+,.2f}")
+present("It is not Neutral Earnings Power")
+present("removes no tranche and no year")
 
 # ------------------------------------------------------------------- report
 print("=" * 92)

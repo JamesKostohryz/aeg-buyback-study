@@ -233,6 +233,73 @@ RHO_STAR = _rho_star(_ALL)
 RHO_STAR_EARLY = _rho_star(_EARLY)
 RHO_STAR_LATE = _rho_star(_LATE)
 RHO_HEADROOM = RHO_STAR - COE_LONGRUN
+
+# ------------------- the earnings-timing decomposition (added 2026-08-13)
+# The entry effect is struck on ONE accounting year of earnings, chosen only because it
+# follows the purchase. On a cyclical company that inverts the measure: at a peak the market
+# applies a low multiple to peak earnings, the earnings yield at the price paid is high, and
+# the entry effect praises the worst-timed repurchase. This block does not correct that and
+# does not drop any tranche. It SPLITS the published entry effect into the part attributable
+# to the price decision and the part attributable to which year happened to follow:
+#
+#     entry[t] = decision[t] + timing[t]
+#
+# an identity that closes exactly. No published figure moves. The timing term contains no
+# rate at all, so the diagnostic is rate-agnostic by construction.
+#
+# The trend level is NOT point-identified. Backward-looking estimators (the valuation
+# engine's own normalizer) and symmetric ones (log-linear, centred) disagree on the SIGN of
+# the decision component, because Apple's fiscal 2021 jump did not revert. The symmetric
+# family is primary for an ex-post study - see docs/METHODOLOGY-ADDENDUM-Earnings-Timing-
+# Decomposition-2026-08-13.md - and both families are published as a band.
+import timing_decomposition as _td
+
+_TD_EST = _td.build_estimators(epsr, window=range(2013, 2026))
+TD_BAND = _td.decomposition_band(RETIRED, epsr, pxr, R_AEG, FY[:-1], _TD_EST)
+TD_PRIMARY = TD_BAND["loglinear"]
+TD_ALT = TD_BAND["normalizer4"]
+_sym = [TD_BAND[n] for n in _td.SYMMETRIC_ESTIMATORS]
+_bwd = [TD_BAND[n] for n in _td.BACKWARD_ESTIMATORS]
+TD_SYM_LO, TD_SYM_HI = min(d["decision"] for d in _sym), max(d["decision"] for d in _sym)
+TD_BWD_LO, TD_BWD_HI = min(d["decision"] for d in _bwd), max(d["decision"] for d in _bwd)
+TD_SYM_BE_LO, TD_SYM_BE_HI = min(d["break_even"] for d in _sym), max(d["break_even"] for d in _sym)
+TD_BWD_BE_LO, TD_BWD_BE_HI = min(d["break_even"] for d in _bwd), max(d["break_even"] for d in _bwd)
+TD_DEP_PRIMARY = _td.timing_dependence(TD_PRIMARY["entry"], TD_PRIMARY["timing"])
+TD_DEP_ALT = _td.timing_dependence(TD_ALT["entry"], TD_ALT["timing"])
+TD_GROWTH = _TD_EST["loglinear"].growth
+
+_LBL = {"loglinear": "Log-linear fit, whole window", "centered3": "Centred geometric mean, &plusmn;3yr",
+        "centered2": "Centred geometric mean, &plusmn;2yr", "normalizer4": "Engine normalizer, 4-year window",
+        "normalizer6": "Engine normalizer, 6-year window", "normalizer8": "Engine normalizer, 8-year window"}
+
+_rows = []
+for t in FY[:-1]:
+    r = TD_PRIMARY["rows"][t]
+    _rows.append(
+        f'<tr><td>{t}</td><td class="num">{r["shares"]:,.0f}</td>'
+        f'<td class="num">{r["real_px"]:,.2f}</td><td class="num">{r["eps_next"]:,.3f}</td>'
+        f'<td class="num">{r["trend_next"]:,.3f}</td>'
+        f'<td class="num" style="color:{"#0f7a52" if r["entry"]>0 else "#c0392b"}">{r["entry"]/1000:+,.2f}</td>'
+        f'<td class="num" style="color:{"#0f7a52" if r["decision"]>0 else "#c0392b"}">{r["decision"]/1000:+,.2f}</td>'
+        f'<td class="num" style="color:{"#0f7a52" if r["timing"]>0 else "#c0392b"}">{r["timing"]/1000:+,.2f}</td></tr>')
+_rows.append(
+    f'<tr class="grand"><td>FY2013&ndash;24</td><td class="num">&mdash;</td><td class="num">&mdash;</td>'
+    f'<td class="num">&mdash;</td><td class="num">&mdash;</td>'
+    f'<td class="num">{TD_PRIMARY["entry"]/1000:+,.2f}</td>'
+    f'<td class="num">{TD_PRIMARY["decision"]/1000:+,.2f}</td>'
+    f'<td class="num">{TD_PRIMARY["timing"]/1000:+,.2f}</td></tr>')
+TD_ROWS = "".join(_rows)
+
+_brows = []
+for _n in _td.ALL_ESTIMATORS:
+    _d = TD_BAND[_n]
+    _fam = "Symmetric" if _d["family"] == "symmetric" else "Backward-looking"
+    _brows.append(
+        f'<tr><td>{_LBL[_n]}</td><td>{_fam}</td>'
+        f'<td class="num" style="color:{"#0f7a52" if _d["decision"]>0 else "#c0392b"}">{_d["decision"]/1000:+,.2f}</td>'
+        f'<td class="num">{_d["timing"]/1000:+,.2f}</td>'
+        f'<td class="num">{100*_d["break_even"]:.2f}%</td></tr>')
+TD_BAND_ROWS = "".join(_brows)
 COE_HIST_MEAN = sum(COE[t] for t in _ALL) / len(_ALL)
 
 
@@ -831,6 +898,87 @@ against the engine's own fixture as leaving the four-method value tie unaffected
 rather than deferred. It has not been run on this company. When it is, the number to compare it
 against is the {10000*RHO_HEADROOM:.0f} basis points above.</div>
 
+<div class="exh"><div class="eh">Exhibit 3b &middot; What the entry effect is made of</div>
+<table class="fig"><thead><tr><th>Fiscal year</th><th class="r">Shares retired mn</th>
+<th class="r">Real price paid</th><th class="r">Real EPS next yr</th><th class="r">Trend EPS next yr</th>
+<th class="r">Entry effect</th><th class="r">Price decision</th><th class="r">Earnings timing</th></tr></thead>
+<tbody>{TD_ROWS}</tbody></table>
+<p class="cap">Real 2026 dollars, billions. <b>Price decision</b> is the shares retired times the
+trend level of real earnings per share in the following year, less the real cost of equity applied
+to the real price paid. <b>Earnings timing</b> is the shares retired times the amount by which that
+year's reported earnings per share departed from the trend level. The two sum to the entry effect
+exactly, row by row and in total, because they are an algebraic split of it and not an adjustment to
+it. Trend here is the log-linear fit to Apple's own real earnings per share across
+FY2013&ndash;25, a fitted real rate of {100*TD_GROWTH:.2f} percent a year. It is a descriptive
+statistic of realized earnings. <b>It is not Neutral Earnings Power, it is not a forecast, and it
+enters no valuation anywhere in this study.</b></p></div>
+
+<p>The entry effect in Exhibit 3 is struck on a single accounting year of earnings &mdash; the year
+that happens to follow each purchase. That one year carries the whole verdict on the purchase, and
+on a company whose earnings move with a cycle it carries it in precisely the wrong direction. At a
+cycle peak the market applies a low multiple to peak earnings, so the earnings yield at the price
+paid runs high and the entry effect prints large and positive, flattering a repurchase made at the
+top. At a trough the reverse happens and a well-timed purchase is condemned. Left alone, the measure
+would systematically praise the worst-timed repurchase programs in the market. Apple's earnings are
+comparatively smooth, which is the only reason this went unnoticed here as long as it did.</p>
+
+<p>The split above does not correct that, and it removes no tranche and no year. Every one of the
+thirteen repurchase years remains in the account at its reported figures, and no number published
+anywhere else in this study moves. What the split does is say how much of each year's verdict was
+the price Apple paid and how much was the accident of which year came next. Note what the timing
+column does not contain: any rate at all. It is the shares retired times an earnings difference, so
+the diagnostic cannot be tuned by an argument about the cost of equity.</p>
+
+<div class="signal"><b>The trend level is not pinned down by this data, and that is a result rather
+than an inconvenience.</b> Two families of estimator are defensible and they disagree on the
+sign of the price-decision column. Symmetric estimators, which use the whole realized path
+including what came after, put the price decision between
+<b>{TD_SYM_LO/1000:+,.2f}</b> and <b>{TD_SYM_HI/1000:+,.2f} billion</b>. Backward-looking
+estimators, which stand at each year and look only behind them, put it between
+<b>{TD_BWD_LO/1000:+,.2f}</b> and <b>{TD_BWD_HI/1000:+,.2f} billion</b>.<br><br>
+The cause is fiscal 2021, and it is worth being exact about it. Apple's real earnings per share went
+from {epsr[2020]:,.2f} to {epsr[2021]:,.2f} that year and stood at {epsr[2025]:,.2f} in fiscal 2025.
+<b>The jump did not revert.</b> A backward-looking estimator standing in 2021 has no way to know
+that and reads a durable step in the level of the business as a spike far above trend. With four
+further years of reported earnings in hand, that reading is an artifact. This study therefore takes
+the symmetric family as primary and reports the backward-looking family alongside it rather than
+suppressing either, on the same principle by which it publishes two cost-of-equity readings in this
+section and declines to choose between them.<br><br>
+The backward-looking family used here is the valuation engine's own normalizer, the quantity its
+forecast gates use to decide whether a terminal year is representative. It is backward-only by
+design, and correctly so: at the end of a forecast there is no future to look at. That constraint
+does not bind on a study of what already happened.</div>
+
+<div class="exh"><div class="eh">Exhibit 3c &middot; The decomposition under every estimator</div>
+<table class="fig"><thead><tr><th>Trend estimator</th><th>Family</th>
+<th class="r">Price decision</th><th class="r">Earnings timing</th>
+<th class="r">Decision break-even</th></tr></thead>
+<tbody>{TD_BAND_ROWS}</tbody></table>
+<p class="cap">Real 2026 dollars, billions. The entry effect is
+{TD_PRIMARY["entry"]/1000:+,.2f} billion in every row &mdash; only the split moves. <b>Decision
+break-even</b> is the real cost of equity at which the price-decision column alone crosses zero,
+the same closed-form root as the headline break-even earlier in this section and computed the same
+way. The centred estimators are truncated within three years of either end of the sample, where they
+degenerate toward a one-sided average; on the four affected tranches they are not a centred reading
+and should not be read as one. The log-linear fit is taken as primary partly because it has no such
+edge.</p></div>
+
+<p>Read on the primary basis, the program's positive entry effect survives the split:
+<b>{TD_PRIMARY["decision"]/1000:+,.2f} billion</b> of the
+{TD_PRIMARY["entry"]/1000:+,.2f} billion is the price decision and
+<b>{TD_PRIMARY["timing"]/1000:+,.2f} billion</b> is earnings timing, so timing accounts for
+{100*TD_DEP_PRIMARY:.0f} percent of the headline. The decision break-even of
+{100*TD_SYM_BE_LO:.2f} to {100*TD_SYM_BE_HI:.2f} percent still sits above the
+{100*COE_LONGRUN:.2f} percent the engine uses, which is the same conclusion the headline reaches,
+reached without leaning on any single year's earnings. On the backward-looking basis the timing
+component is {100*TD_DEP_ALT:.0f} percent of the headline &mdash; larger than the result it sits
+inside &mdash; and the decision break-even falls to
+{100*TD_BWD_BE_HI:.2f} percent, below the engine's rate. Both readings are stated. Neither is
+suppressed.</p>
+
+<p class="punch">Timing dependence is the number to carry to the next company. Where it approaches
+or exceeds one hundred percent, the entry effect is not a verdict on the price paid.</p>
+
 <h2><span class="no">4</span>The Internal Rate Of Return, Three Ways</h2>
 
 <p>A cleaner measure treats the program as an investment: each year's cash out, the dividends the
@@ -1340,7 +1488,7 @@ claude/AEG-Capital-Attribution-SPEC-2026-08-08.md.
 </body></html>
 """
 
-open('Buyback-Study-AAPL.html', 'w').write(HTML)
+open('../Buyback-Study-AAPL.html', 'w').write(HTML)
 print("wrote Buyback-Study-AAPL.html", len(HTML), "bytes")
 print(f"check: EPS cagr {100*((EPS[2025]/EPS[2012])**(1/13)-1):.2f}  "
       f"NI cagr {100*((NI[2025]/NI[2012])**(1/13)-1):.2f}  "

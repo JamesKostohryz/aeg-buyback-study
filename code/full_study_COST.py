@@ -137,6 +137,57 @@ print(f"break-even real cost of equity (root of cumulative entry effect, retirem
       f"forward real earnings yield on the whole program): {100*breakeven_coe:.2f}%  "
       f"(placeholder used: {100*COE_RATE:.2f}%)")
 
+# ---- earnings-timing decomposition (methodology addendum 2026-08-13) ----
+# The entry effect above is struck on ONE year of earnings, the year that happens to follow each
+# purchase. Split it into the price decision and the accident of which year came next. This is an
+# identity: the two sum to the entry effect exactly, no tranche is dropped, nothing above moves.
+import timing_decomposition as td
+
+_tranches = sorted(entry_effect)
+_shares = {t: study.retired[t] for t in _tranches}
+_est = td.build_estimators(real_eps, window=sorted(y for y in real_eps if y >= min(years)))
+_band = td.decomposition_band(_shares, real_eps, real_price_paid, COE_RATE, _tranches, _est)
+_prim = _band["loglinear"]
+
+print("\n--- EARNINGS-TIMING DECOMPOSITION (entry = price decision + earnings timing) ---")
+print(f"  log-linear fitted real EPS trend: {100*_est['loglinear'].growth:+.2f}%/yr "
+      f"over FY{_est['loglinear'].span[0]}-{_est['loglinear'].span[1]}")
+print(f"  {'year':<6}{'entry':>10}{'decision':>11}{'timing':>10}")
+for t in _tranches:
+    r = _prim["rows"][t]
+    print(f"  FY{t:<4}{r['entry']/1000:>+10.3f}{r['decision']/1000:>+11.3f}{r['timing']/1000:>+10.3f}")
+print(f"  {'TOTAL':<6}{_prim['entry']/1000:>+10.3f}{_prim['decision']/1000:>+11.3f}"
+      f"{_prim['timing']/1000:>+10.3f}   ($bn)")
+_resid = max(abs(_band[n]["decision"] + _band[n]["timing"] - _band[n]["entry"]) for n in _band)
+print(f"  identity residual across all six estimators: {_resid:.2e} (must be ~0)")
+
+_dep = td.timing_dependence(_prim["entry"], _prim["timing"])
+print(f"\n  TIMING DEPENDENCE = {100*_dep:.0f}% of the headline entry effect")
+if _dep >= 1.0:
+    print("  *** AT OR ABOVE 100%: the earnings-timing accident is larger than the result it sits")
+    print("      inside. The entry effect must NOT be read as a verdict on the price paid for this")
+    print("      company. Report it with the decomposition beside it, never alone. ***")
+elif _dep >= 0.5:
+    print("  ** ELEVATED: earnings timing carries a large share of the verdict. Publish the")
+    print("     decomposition alongside the entry effect. **")
+else:
+    print("  (moderate: the entry effect is carried mainly by the price decision)")
+
+print(f"  {'estimator':<14}{'family':<18}{'decision':>10}{'timing':>10}{'dec b/e':>10}")
+for n in td.ALL_ESTIMATORS:
+    d = _band[n]
+    print(f"  {n:<14}{d['family']:<18}{d['decision']/1000:>+10.3f}{d['timing']/1000:>+10.3f}"
+          f"{100*d['break_even']:>9.2f}%")
+_sym = [_band[n] for n in td.SYMMETRIC_ESTIMATORS]
+_bwd = [_band[n] for n in td.BACKWARD_ESTIMATORS]
+if min(d["decision"] for d in _sym) * max(d["decision"] for d in _bwd) < 0:
+    print("  NOTE: the two estimator families disagree on the SIGN of the price decision. The trend")
+    print("        level is not point-identified on this company; publish the band, not a point.")
+else:
+    print("  NOTE: both estimator families agree on the sign of the price decision.")
+print("  (COE placeholder caveat above applies to the decision column; the timing column contains")
+print("   no rate at all and is unaffected by it.)")
+
 # entity-level AEG (real), cum-dividend form: AEG(s) = NI_r(s) - (1+r)*NI_r(s-1) + r*D_r(s-1)
 print("\n--- entity-level AEG (real, cum-dividend form) ---")
 real_ni = {y: FIN['net_income'][y] / DEFL[y] for y in FIN['net_income'] if y in DEFL}
