@@ -61,3 +61,15 @@ jobs:
             exit 1
           fi
           echo "roundtrip_test_AAL.py: all round-trip checks confirmed passing."
+
+      - name: Prove the study is invariant to the cost of equity (2026-08-13)
+        working-directory: code
+        run: |
+          set -o pipefail
+          python3 coe_invariance_test.py | tee /tmp/coe_output.txt
+          if ! grep -qE '^ALL [0-9]+ COST-OF-EQUITY INVARIANCE CHECKS PASS$' /tmp/coe_output.txt; then
+            echo ""
+            echo "::error::coe_invariance_test.py did not report ALL CHECKS PASS. Failing the build."
+            exit 1
+          fi
+          echo "coe_invariance_test.py: the rate is an input, not a mechanic. Confirmed."

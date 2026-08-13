@@ -68,6 +68,14 @@ TAGS = {
     'repurchase_cash': 'PaymentsForRepurchaseOfCommonStock',
     'repurchase_accrual': 'StockRepurchasedAndRetiredDuringPeriodValue',
     'shares_retired': 'StockRepurchasedAndRetiredDuringPeriodShares',
+    # DEFECT 20 (2026-08-13, found on Microsoft). A company that repurchases and
+    # retires in one motion may tag the flow WITHOUT the word "Retired".
+    # Microsoft files StockRepurchasedDuringPeriodShares for every year of its
+    # history and nothing else, so the template saw no retirement flow at all,
+    # fell through every fallback, and left all thirteen years unresolved on the
+    # largest repurchase program in the sample.
+    'shares_repurchased': 'StockRepurchasedDuringPeriodShares',
+    'shares_repurchased_value': 'StockRepurchasedDuringPeriodValue',
     'issuance_proceeds': 'ProceedsFromIssuanceOfCommonStock',
     'sbc': 'ShareBasedCompensation',
     'tax_withholding': 'PaymentsRelatedToTaxWithholdingForShareBasedCompensation',
@@ -452,19 +460,108 @@ class BuybackStudy:
         Apple's direct tag turned out to be the less common pattern, not the
         norm.
         """
+        # Memoized: this is called from several places and each call used to
+        # append its notes again, so a single splice was reported three times.
+        # A reader who sees the same warning three times learns to skim
+        # warnings, which is the opposite of what they are for.
+        if getattr(self, '_shares_out_cache', None) is not None:
+            return self._shares_out_cache
         if self.shares_out is not None:
             return self.shares_out
         raw = self.sec.get('shares_outstanding', {})
-        if raw:
-            return {y: e['val'] * self.cfg.split_factor(e['filed']) / 1e6
-                    for y, e in raw.items()}
+        out = {y: e['val'] * self.cfg.split_factor(e['filed']) / 1e6
+               for y, e in raw.items()} if raw else {}
+
+        # DEFECT 17 (2026-08-13, found on AutoZone). A large number of filers
+        # stop tagging CommonStockSharesOutstanding at some point and report the
+        # count only on the cover page of the Form 10-K, as the Document and
+        # Entity Information element EntityCommonStockSharesOutstanding.
+        # AutoZone stops in fiscal 2018 and files seven more years of heavy
+        # repurchases with no us-gaap share count at all, which under defect 16
+        # silently halved the study window.
+        #
+        # The cover-page count is a DIFFERENT MEASUREMENT, not a synonym: it is
+        # struck as of the filing date, typically a few weeks after the fiscal
+        # year end, so it includes any share movement in between. It is used
+        # only to fill years the us-gaap series does not reach, it is announced,
+        # and where the two series overlap they must AGREE - a level shift
+        # between two sources spliced into one line would move every derived
+        # retirement in the window and close every identity while doing it.
+        dei = self.sec.get('shares_outstanding_dei', {})
+        if dei:
+            cover = {y: e['val'] * self.cfg.split_factor(e['filed']) / 1e6
+                     for y, e in dei.items()}
+            overlap = sorted(set(out) & set(cover))
+            gap = [y for y in cover if y not in out]
+            if overlap:
+                worst = max(abs(cover[y] / out[y] - 1) for y in overlap if out[y])
+            else:
+                worst = None
+            if not out:
+                self.notes.append(
+                    "SHARE COUNT FROM THE COVER PAGE: no CommonStockSharesOutstanding "
+                    "is tagged in any year, so the count is taken from the Form 10-K "
+                    "cover page (EntityCommonStockSharesOutstanding). That figure is "
+                    "struck as of the FILING date, not the fiscal year end, so every "
+                    "derived retirement carries a few weeks of share movement it "
+                    "should not. Treat derived years as approximate and lean on the "
+                    "price validator.")
+                out = cover
+            elif gap and worst is not None and worst <= 0.02:
+                self.notes.append(
+                    f"SHARE COUNT EXTENDED FROM THE COVER PAGE for FY{sorted(gap)}: "
+                    "CommonStockSharesOutstanding stops before the end of the window "
+                    "and the cover-page count fills the rest. The two agree to within "
+                    f"{100*worst:.2f}% in the {len(overlap)} overlapping year(s), which "
+                    "is why the splice is allowed. The cover-page figure is as of the "
+                    "FILING date, so the filled years carry a few weeks of share "
+                    "movement the others do not.")
+                _merged = dict(cover)
+                _merged.update(out)      # the us-gaap series wins wherever it exists
+                out = _merged
+            elif gap:
+                self.notes.append(
+                    "COVER-PAGE SHARE COUNT REFUSED: CommonStockSharesOutstanding stops "
+                    f"before the end of the window and the cover-page count disagrees "
+                    f"with it by up to {100*(worst or 0):.1f}% in the overlapping "
+                    f"year(s) ({overlap or 'none at all'}). Splicing two series that do "
+                    "not agree would move every derived retirement in the window while "
+                    "closing every identity. The later years are left without a share "
+                    "count instead.")
+        if out:
+            self._shares_out_cache = out
+            return out
         issued = self.sec.get('shares_issued', {})
         treasury = self.sec.get('treasury_shares_balance', {})
+        if not issued and not treasury and not raw and not dei:
+            # DEFECT 22 (2026-08-13, found on Meta Platforms and Alphabet). A
+            # company with more than one class of common stock reports every
+            # share count DIMENSIONED by class, and the Securities and Exchange
+            # Commission's company-concept interface serves only undimensioned
+            # facts. So the structured data carries no share count at all - not
+            # a short one, none - and no amount of fallback inside this file can
+            # produce one. Meta Platforms is the pure case: not one of the five
+            # share-count elements this template knows returns anything.
+            #
+            # This is a limit of the INTERFACE, not of the company or of the
+            # study, and it is named as such so nobody spends another session
+            # looking for a tag that is not reachable. Reading it requires the
+            # filing itself.
+            self.notes.append(
+                "NO SHARE COUNT IS REACHABLE THROUGH THE STRUCTURED INTERFACE: none "
+                "of CommonStockSharesOutstanding, CommonStockSharesIssued, the "
+                "treasury balance or the cover-page count returns anything. The usual "
+                "cause is MORE THAN ONE CLASS OF COMMON STOCK, which makes every "
+                "share-count fact dimensioned by class, and the company-concept "
+                "interface serves only undimensioned facts. No study of this company "
+                "is possible from structured data alone; the counts must be read out "
+                "of the filing.")
         out = {}
         for y in sorted(set(issued) & set(treasury)):
             iss = issued[y]['val'] * self.cfg.split_factor(issued[y]['filed'])
             tre = treasury[y]['val'] * self.cfg.split_factor(treasury[y]['filed'])
             out[y] = (iss - tre) / 1e6
+        self._shares_out_cache = out or None
         if out and not getattr(self, '_noted_shares_outstanding_source', False):
             self.notes.append(
                 "no CommonStockSharesOutstanding tagged; shares outstanding "
@@ -492,6 +589,20 @@ class BuybackStudy:
         filed = {y: e['val'] * self.cfg.split_factor(e['filed']) / 1e6
                  for y, e in self.sec.get('shares_retired', {}).items()}
         retired_tag = 'StockRepurchasedAndRetiredDuringPeriodShares'
+
+        # --------------------------------------------------------- defect 20
+        if not filed:
+            alt = {y: e['val'] * self.cfg.split_factor(e['filed']) / 1e6
+                   for y, e in self.sec.get('shares_repurchased', {}).items()}
+            if alt:
+                filed = alt
+                retired_tag = 'StockRepurchasedDuringPeriodShares'
+                self.notes.append(
+                    "no StockRepurchasedAndRetiredDuringPeriodShares tagged; used "
+                    "StockRepurchasedDuringPeriodShares instead. The element does not "
+                    "say whether the shares were cancelled or parked, so permanence is "
+                    "decided separately from the treasury balance, not inferred from "
+                    "this tag.")
 
         # --------------------------------------------------------- defect 1
         if not filed:
@@ -552,6 +663,14 @@ class BuybackStudy:
                                 "than reported as a negative or zero "
                                 "retirement.")
                     self.notes.append(msg)
+        # DEFECT 21 (2026-08-13). retired_tag was initialized to the name of the
+        # PREFERRED element and then only overwritten when a fallback fired, so
+        # a company that tags no retirement flow at all reported
+        # "retired tag = StockRepurchasedAndRetiredDuringPeriodShares" at the
+        # top of its study while resolving nothing. The header said the data was
+        # there. A label that lies about its own source is worse than no label.
+        if not filed:
+            retired_tag = 'NONE FOUND - no retirement or treasury flow tagged'
         self.retired_tag = retired_tag
 
         # observed issuance rates, from the years we can see both sides
@@ -654,10 +773,36 @@ class BuybackStudy:
             return v / 1e6 - self.withholding_in_repurchase_cash.get(y, 0.0)
 
         retired, issued, derived, unresolved, no_cash = {}, {}, set(), set(), set()
+        no_count, negative = set(), set()
         for y in self.years():
             if y not in S or (y - 1) not in S:
+                # DEFECT 16 (2026-08-13, found on AutoZone, and the dangerous
+                # kind). A year with no share-count observation used to be
+                # skipped here with a bare `continue` - not recorded as
+                # unresolved, not counted, not mentioned. AutoZone stops
+                # tagging CommonStockSharesOutstanding after fiscal 2018 and
+                # files the count on the cover page instead, so seven of its
+                # thirteen years fell through this line. The study then
+                # reported `unresolved = []` and published a six-year program
+                # as though the window it named in its own heading were
+                # complete. Nothing failed. Nothing looked wrong.
+                #
+                # A year that cannot be measured is now named, and a year in
+                # which cash was demonstrably spent is named louder.
+                no_count.add(y)
                 continue
             if y in filed:
+                # DEFECT 23 (2026-08-13, found on Booking Holdings). A NEGATIVE
+                # shares-retired figure is not a small retirement, it is not a
+                # net issuance, and it is not a number this study can use: it
+                # divides repurchase cash into a negative price per share, which
+                # then flows into the entry effect as a positive contribution.
+                # Booking Holdings' fiscal 2014 printed -45.8mn shares and a
+                # real price of MINUS $23.20, and the entry effect was struck on
+                # it anyway. A negative quantity is refused at source.
+                if filed[y] < 0:
+                    negative.add(y)
+                    continue
                 retired[y], issued[y] = filed[y], S[y] - S[y - 1] + filed[y]
                 continue
             c = _repurchase_cash(y)
@@ -674,6 +819,37 @@ class BuybackStudy:
                 derived.add(y)
             else:
                 unresolved.add(y)
+
+        self.negative_retirement_years = negative
+        if negative:
+            self.notes.append(
+                "NEGATIVE RETIREMENT REFUSED in " +
+                ", ".join(f"FY{y}" for y in sorted(negative)) +
+                ": the filed shares-retired figure is negative, which divides "
+                "repurchase cash into a negative price per share. The year is "
+                "excluded from every measure rather than carried with a sign "
+                "nobody intended. The usual cause is a reissuance netted into "
+                "the same element; read the filing before assuming otherwise.")
+            unresolved |= negative
+
+        self.no_share_count_years = no_count
+        if no_count:
+            spent = {y: _repurchase_cash(y) for y in no_count}
+            spent = {y: v for y, v in spent.items() if v and v > 0}
+            msg = ("NO SHARE COUNT for " +
+                   ", ".join(f"FY{y}" for y in sorted(no_count)) +
+                   ": the shares-outstanding series does not cover the year or "
+                   "the year before it, so no retirement, price or issuance "
+                   "can be computed. These years are NOT in any figure below.")
+            if spent:
+                msg += (" THIS MATTERS: ${:,.0f}m of repurchase cash was spent "
+                        "in ".format(sum(spent.values())) +
+                        ", ".join(f"FY{y}" for y in sorted(spent)) +
+                        ", so the window actually measured is shorter than the "
+                        "window named. Either extend the share-count series or "
+                        "narrow the study window and say so.")
+            self.notes.append(msg)
+            unresolved |= set(spent)
 
         self.no_repurchase_years = no_cash
         if no_cash:
@@ -1018,10 +1194,40 @@ class BuybackStudy:
         entity-level abnormal earnings growth recursion."""
         rep = {y: e['val'] / 1e6
                for y, e in self.sec.get('repurchase_cash', {}).items()}
-        d = self.fin['dividends']
-        return {y: (d[y] + rep.get(y, 0.0)) * self.deflator[y]
+        d = self.fin.get('dividends')
+        if d is None:
+            # DEFECT 15 (2026-08-13, found on AutoZone). A company that pays no
+            # dividend files no dividend element, and the old code took
+            # self.fin['dividends'] straight, so the whole entry effect died
+            # with KeyError: 'dividends'. AutoZone is the archetype: it returns
+            # everything through repurchases and has never paid a dividend.
+            #
+            # A missing input is never silently zero - but an absent dividend
+            # element is not always a missing input, and treating the two the
+            # same is its own error. The distinction is made on EVIDENCE and
+            # announced either way; `dividends_are_zero` is set by the driver
+            # only when no dividend element of ANY known name is filed.
+            if getattr(self, 'dividends_are_zero', False):
+                self.notes.append(
+                    "NO DIVIDEND: this company files no dividend element under "
+                    "any known name in any year of the window, so the dividend "
+                    "stream is taken as a genuine zero rather than as missing "
+                    "data. That is a claim about the company and it is stated "
+                    "here so it can be checked, not buried in an arithmetic "
+                    "default.")
+                d = {}
+            else:
+                raise ValueError(
+                    "no dividend series was supplied and the driver did not "
+                    "assert that this company pays none. A dividend stream "
+                    "that is absent because nobody fetched it and one that is "
+                    "absent because the company pays nothing are different "
+                    "facts and this will not guess between them. Set "
+                    "`dividends_are_zero = True` on the study only on the "
+                    "evidence that no dividend element of any name is filed.")
+        return {y: (d.get(y, 0.0) + rep.get(y, 0.0)) * self.deflator[y]
                 for y in self.earnings_span()
-                if d.get(y) is not None and y in self.deflator}
+                if y in self.deflator}
 
     def aeg_entity(self, rho, years=None):
         """Entity-level abnormal earnings growth, real, cum-dividend form:
@@ -1055,8 +1261,22 @@ class BuybackStudy:
         Returns (tranches, excluded) where excluded is {year: reason}.
         """
         eps = self.real_eps()
+        # DEFECT 24 (2026-08-13, found on Booking Holdings). The price validator
+        # is the guard that catches a derived share count whose implied price
+        # never existed. It was REPORTING failures at the top of the study and
+        # nothing was acting on them: Booking Holdings failed validation in
+        # fiscal 2013 and 2014 - an implied $96.19 against a traded range of
+        # $25.11 to $47.95, and an implied MINUS $16.39 - and the entry effect
+        # was struck on both years regardless. A guard whose finding does not
+        # reach the measure is not a guard.
+        failed = {y for y, *_ in (getattr(self, 'price_failures', None) or [])}
         tranches, excluded = [], {}
         for y in self.years():
+            if y in failed:
+                excluded[y] = ('the implied average price paid failed validation '
+                               'against the year\'s own traded range, so the share '
+                               'count behind it cannot be right')
+                continue
             q = self.retired.get(y)
             if not q:
                 excluded[y] = 'no shares retired'
@@ -2216,6 +2436,13 @@ class BuybackStudy:
 
     def report(self, dilution_absorption_threshold=0.80):
         t, w = self.timing_result, self.wedge
+
+        # A quantity an earlier guard declined to compute prints as the word
+        # "unavailable". It must never print as a zero, an em dash or a blank,
+        # each of which a reader can mistake for a measurement (defects 14, 18).
+        def _f(v, fmt):
+            return format(v, fmt) if v is not None else "unavailable"
+
         L = [f"{self.cfg.ticker}  FY{self.cfg.first_year}-FY{self.cfg.last_year}",
              "-" * 64]
         # Cash and shares must share the same basis (defect 4): years with
@@ -2267,7 +2494,6 @@ class BuybackStudy:
         # A timing test that could not be struck prints as unavailable. It must
         # never print as a zero or an em dash the reader can mistake for one
         # (defect 14).
-        _f = (lambda v, fmt: format(v, fmt) if v is not None else "unavailable")
         L += [f"cash spent            {tot_cash:14,.0f}",
               f"shares retired        {tot_q:14,.0f} mn",
               f"dollar-wtd price paid {tot_cash/tot_q:14,.2f}" if tot_q
@@ -2280,20 +2506,39 @@ class BuybackStudy:
               + ("%" if t['allocation_across_years'] is not None else ""),
               "",
               f"dilution offset       {100*offset:13.1f}%  {offset_desc}",
-              f"comp economic cost    {w['economic_cost']:14,.0f}",
-              f"comp accounting chg   {w['accounting_charge']:14,.0f}",
-              f"wedge                 {w['wedge']:14,.0f}  ({w['multiple']:.2f}x)"]
+              # DEFECT 18 (2026-08-13, found on General Electric and Exxon
+              # Mobil). Every line in this block formats a number that an
+              # earlier guard is entitled to return as None, and a format
+              # string does not survive one. A company that tags no share-based
+              # compensation has no wedge MULTIPLE - the denominator is zero -
+              # and the honest print is the word, not a crash and not a zero
+              # that reads as "no wedge".
+              f"comp economic cost    {_f(w['economic_cost'], '14,.0f')}",
+              f"comp accounting chg   {_f(w['accounting_charge'], '14,.0f')}",
+              f"wedge                 {_f(w['wedge'], '14,.0f')}"
+              + (f"  ({w['multiple']:.2f}x)" if w.get('multiple') is not None
+                 else "  (multiple unavailable - no accounting charge tagged)")]
         if offset >= dilution_absorption_threshold:
             L += ["", f"*** DILUTION OFFSET {100*offset:.1f}% >= "
                       f"{100*dilution_absorption_threshold:.0f}% - {offset_desc.upper()} ***"]
         nc = getattr(self, 'net_cost', None)
         if nc is not None:
             lab = nc['label'].upper()
+            # Every one of these four is None when its denominator is
+            # unusable - a company that issued more shares than it retired over
+            # the window has no positive net reduction to divide by, and Boeing
+            # is exactly that company (defect 18, second instance).
             L += ["", f"WHAT A SHARE COST  ({nc['basis']})",
-                  f"  A gross price paid    {nc['A_gross_price']:14,.2f}",
-                  f"  B cash / net          {nc['B_per_share']:14,.2f}   per share {nc['label']}",
-                  f"  C less plan proceeds  {nc['C_per_share']:14,.2f}",
-                  f"  D plus withholding    {nc['D_per_share']:14,.2f}"]
+                  f"  A gross price paid    {_f(nc['A_gross_price'], '14,.2f')}",
+                  f"  B cash / net          {_f(nc['B_per_share'], '14,.2f')}"
+                  f"   per share {nc['label']}",
+                  f"  C less plan proceeds  {_f(nc['C_per_share'], '14,.2f')}",
+                  f"  D plus withholding    {_f(nc['D_per_share'], '14,.2f')}"]
+            if nc['net_reduction'] is not None and nc['net_reduction'] <= 0:
+                L += [f"  NET REDUCTION IS {nc['net_reduction']:,.1f} MN - the company ended "
+                      "the window with MORE shares outstanding than it started with.",
+                      "  Measures B, C and D are undefined and are not reported. The "
+                      "program did not reduce the count; it absorbed issuance."]
             t = nc['treasury']
             if t['basis'] == 'treasury':
                 oh = t['overhang_shares_latest']

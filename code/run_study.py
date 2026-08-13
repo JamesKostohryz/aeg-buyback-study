@@ -40,6 +40,7 @@ USAGE
 import argparse
 import csv
 import json
+import math
 import os
 import sys
 import time
@@ -89,7 +90,21 @@ FIN_TAGS = {
 # Repurchase-side elements come straight from the template's own TAGS map, so a
 # tag added there for one company is available to every company at once. That is
 # the whole point: there is one list, in one place.
-SEC_KEYS = list(TAGS)
+DEI_TAGS = {'shares_outstanding_dei': 'EntityCommonStockSharesOutstanding'}
+
+# Every element name under which a company might file a dividend. If NONE of
+# them is present, the company almost certainly pays no dividend - which is a
+# fact worth stating rather than a hole worth defaulting. AutoZone is the
+# archetype and it is not a rarity: it is the pure form of the thing this whole
+# study is about, a company that returns everything through repurchases.
+DIVIDEND_EVIDENCE_TAGS = (
+    'PaymentsOfDividends', 'PaymentsOfDividendsCommonStock',
+    'PaymentsOfDistributionsToAffiliates', 'Dividends', 'DividendsCommonStock',
+    'CommonStockDividendsPerShareDeclared', 'CommonStockDividendsPerShareCashPaid',
+)
+
+
+SEC_KEYS = list(TAGS) + list(DEI_TAGS)
 
 
 def _get(url, tries=4):
@@ -128,13 +143,69 @@ def fetch_raw(cik, path):
         else:
             raw[key] = d
         time.sleep(0.12)                    # the SEC asks for ten a second
+    # The cover-page share count lives in the dei taxonomy, not us-gaap, and it
+    # is the only share count a large number of filers still publish (defect 17).
+    for key, tag in DEI_TAGS.items():
+        d = _get(f"https://data.sec.gov/api/xbrl/companyconcept/"
+                 f"CIK{cik}/dei/{tag}.json")
+        if d is None:
+            absent.append(f'{key} (dei:{tag})')
+        else:
+            raw[key] = d
+        time.sleep(0.12)
+    # Evidence for "this company pays no dividend", gathered rather than assumed.
+    div_found = []
+    for tag in DIVIDEND_EVIDENCE_TAGS:
+        d = _get(f"https://data.sec.gov/api/xbrl/companyconcept/"
+                 f"CIK{cik}/us-gaap/{tag}.json")
+        if d is not None:
+            div_found.append(tag)
+            raw[f'divev__{tag}'] = d
+        time.sleep(0.12)
+    raw['__dividend_elements__'] = div_found
     raw['__absent__'] = absent
     with open(path, 'w') as f:
         json.dump(raw, f)
     return raw
 
 
-def build_financials(raw, expected_years):
+def dividend_gap_verdict(raw, gap_years):
+    """Is a hole in the dividend series a fact about the company or a hole in
+    the data?
+
+    DEFECT 19 (2026-08-13, found on Boeing). merge_concept_series refuses a
+    series that does not cover the requested window, and it is right to: a
+    missing year silently treated as zero is how this project has been bitten
+    repeatedly. But Boeing genuinely paid no dividend from 2020 to 2024. A rule
+    that cannot tell "the company suspended its dividend" from "somebody forgot
+    a tag" will either crash on every dividend suspension or swallow every
+    renamed element.
+
+    So the question is settled on EVIDENCE. If NO dividend element of any known
+    name covers the gap years, the company paid nothing in them. If one does,
+    the gap is a tagging gap, the driver is told which element to add, and
+    nothing is assumed.
+    """
+    covered = {}
+    for tag in DIVIDEND_EVIDENCE_TAGS:
+        d = raw.get(f'divev__{tag}')
+        if not d:
+            continue
+        ys = set(parse_concept(d))
+        hit = sorted(set(gap_years) & ys)
+        if hit:
+            covered[tag] = hit
+    return covered
+
+
+# Which statement lines are quoted PER SHARE and which are share COUNTS. A
+# split restates both, in opposite directions, and getting this wrong is defect
+# 25 - the worst thing found in the 2026-08-13 hardening pass.
+PER_SHARE_LINES = ('diluted_eps',)
+SHARE_COUNT_LINES = ('wtd_diluted_shares',)
+
+
+def build_financials(raw, expected_years, cfg_obj=None):
     """The statement lines, in millions, with every alternate merged.
 
     A line the company files under none of its known names comes back missing
@@ -142,7 +213,7 @@ def build_financials(raw, expected_years):
     an untagged dividend stream as no dividends will close every identity it has
     and be wrong about the company.
     """
-    fin, missing = {}, []
+    fin, missing, gaps = {}, [], []
     for key, (alts, mode, scale) in FIN_TAGS.items():
         parts = [parse_concept(raw[f'{key}__{i}'])
                  for i in range(len(alts)) if f'{key}__{i}' in raw]
@@ -150,15 +221,68 @@ def build_financials(raw, expected_years):
         if not parts:
             missing.append(f'{key} ({" or ".join(alts)})')
             continue
-        merged = (parts[0] if len(parts) == 1 else
-                  merge_concept_series(parts, mode=mode,
-                                       expected_years=expected_years, label=key))
-        fin[key] = {y: e['val'] / scale for y, e in merged.items()}
+        try:
+            merged = (parts[0] if len(parts) == 1 else
+                      merge_concept_series(parts, mode=mode,
+                                           expected_years=expected_years, label=key))
+        except ValueError as exc:
+            # Coverage short. For most lines that is a data problem and the
+            # refusal stands. For dividends it is usually a suspension, and
+            # defect 19 settles which on evidence rather than on a default.
+            merged = {}
+            for pt in parts:
+                merged.update(pt)
+            gap = [y for y in expected_years if y not in merged]
+            if key == 'dividends':
+                covered = dividend_gap_verdict(raw, gap)
+                if covered:
+                    raise ValueError(
+                        f"dividends are missing for {gap} and the element(s) "
+                        f"{covered} DO cover those years. This is a tagging gap, "
+                        "not a suspension. Add the element to FIN_TAGS and "
+                        "re-fetch; nothing here will assume a zero.") from exc
+                gaps.append(
+                    f"dividends: no element of any known name covers {gap}, so the "
+                    "company paid no dividend in those years. Taken as a genuine "
+                    "zero on that evidence, not as a default.")
+            else:
+                gaps.append(f"{key}: coverage short, missing {gap}. {exc}")
+        # DEFECT 25 (2026-08-13, found on Booking Holdings, and the most
+        # dangerous defect in this session). Share counts were being restated
+        # onto today's split basis - share_flows() multiplies every filed count
+        # by the cumulative split factor - and prices were being restated, and
+        # EARNINGS PER SHARE WAS NOT. Booking Holdings split twenty-five for one
+        # on 6 April 2026, after the end of the study window, so every as-filed
+        # earnings-per-share figure in the window is twenty-five times the
+        # restated one. The study duly reported forward real earnings yields of
+        # 87, 143 and 151 percent and a break-even real cost of equity of 92.72
+        # percent, all of it internally consistent, all of it closing every
+        # identity the template checks, and all of it wrong by a factor of
+        # twenty-five.
+        #
+        # Apple never exposed this because its driver supplies an
+        # already-restated earnings series from a committed file. Every company
+        # read straight from the structured interface was exposed to it, and any
+        # company with a split in or after its window would have published
+        # nonsense.
+        #
+        # A per-share amount is DIVIDED by the factor a share count is
+        # multiplied by. Both are done here, from the filed date of each fact,
+        # and the template refuses the whole run if a driver forgets.
+        if cfg_obj is not None and (key in PER_SHARE_LINES or key in SHARE_COUNT_LINES):
+            per_share = key in PER_SHARE_LINES
+            fin[key] = {}
+            for y, e in merged.items():
+                f = cfg_obj.split_factor(e['filed'])
+                v = e['val'] / f if per_share else e['val'] * f
+                fin[key][y] = v / scale
+        else:
+            fin[key] = {y: e['val'] / scale for y, e in merged.items()}
     debt_parts = [fin.pop(k) for k in ('total_debt_nc', 'total_debt_c') if k in fin]
     if debt_parts:
         ys = set().union(*[set(d) for d in debt_parts])
         fin['total_debt'] = {y: sum(d.get(y, 0.0) for d in debt_parts) for y in ys}
-    return fin, missing
+    return fin, missing, gaps
 
 
 def build_sec(raw):
@@ -201,6 +325,115 @@ def load_deflator(path, first, last):
     return out, extrapolated
 
 
+
+# ---------------------------------------------------------------------------
+# PRICES AND SPLITS, FETCHED RATHER THAN HANDED IN (2026-08-13)
+# ---------------------------------------------------------------------------
+# Until now a price series was a comma-separated file somebody built by hand and
+# a split list was something somebody typed into a CompanyConfig. Both are inputs
+# that a person can get wrong silently: a missed split restates every share count
+# in the window by a factor of two or seven and the study still closes every
+# identity it has. Apple's own list carries a seven-for-one and a four-for-one,
+# and getting either wrong would move every figure in the published document.
+#
+# So both are read from the vendor and the split list is CHECKED rather than
+# trusted: the raw close is adjusted by the cumulative split factor and the
+# result must land inside the vendor's own dividend-and-split adjusted series
+# to a tolerance, which it cannot do if a split is missing.
+#
+# WHY NOT JUST USE adjusted_close. It strips dividends as well as splits. A
+# repurchase happened at a price somebody actually paid, and a dividend-adjusted
+# price is not one. The study needs split-adjusted-only, which is why the
+# factors are applied here rather than taken from the vendor.
+EODHD_TOKEN_PATHS = (
+    '/sessions/admiring-modest-hypatia/mnt/AEG-Project/.eodhd-token',
+    os.path.expanduser('~/.eodhd-token'),
+    '.eodhd-token', '../.eodhd-token',
+)
+
+
+def _eodhd_token(explicit=None):
+    for p in ((explicit,) if explicit else ()) + EODHD_TOKEN_PATHS:
+        if p and os.path.exists(p):
+            return open(p).read().strip()
+    raise SystemExit(
+        "no EODHD token found. It lives at C:\\Users\\james\\AEG-Project\\.eodhd-token; "
+        "pass --eodhd-token PATH if it is somewhere else. Never print it.")
+
+
+def _eod(path, token, **params):
+    q = "&".join(f"{k}={v}" for k, v in params.items())
+    url = f"https://eodhd.com/api/{path}?{q}&fmt=json&api_token={token}"
+    with urllib.request.urlopen(urllib.request.Request(url, headers={'User-Agent': UA}),
+                                timeout=60) as r:
+        return json.loads(r.read().decode())
+
+
+def fetch_prices(ticker, token, first_year, last_year, exchange='US'):
+    """Monthly closes and intra-month extremes, on TODAY'S split basis, plus the
+    split list read from the vendor rather than typed in.
+
+    Returns (prices, traded_range_by_calendar_month, splits, checks).
+    """
+    sym = f"{ticker}.{exchange}"
+    start = f"{first_year - 3}-01-01"
+    rows = _eod(f"eod/{sym}", token, period='m', **{'from': start, 'to': '2099-01-01'})
+    try:
+        splits_raw = _eod(f"splits/{sym}", token, **{'from': start, 'to': '2099-01-01'})
+    except Exception:                                    # noqa: BLE001
+        splits_raw = []
+    splits = []
+    for s in splits_raw or []:
+        a, _, b = (s.get('split') or '').partition('/')
+        try:
+            f = float(a) / float(b)
+        except (ValueError, ZeroDivisionError):
+            continue
+        if f and abs(f - 1.0) > 1e-9:
+            splits.append((s['date'], f))
+    splits.sort()
+
+    def factor(datestr):
+        """Cumulative split factor to apply to a price quoted on `datestr` to
+        put it on today's basis. Same convention as CompanyConfig.split_factor."""
+        f = 1.0
+        for d, k in splits:
+            if datestr < d:
+                f *= k
+        return f
+
+    prices, rng, checks = {}, {}, []
+    worst = 0.0
+    for r in rows:
+        d = r['date']
+        k = factor(d)
+        y, m = int(d[:4]), int(d[5:7])
+        prices[(y, m)] = r['close'] / k
+        rng[(y, m)] = (r['low'] / k, r['high'] / k)
+        # The vendor's own adjusted series differs from ours only by dividends,
+        # which are never negative, so ours must sit AT OR ABOVE it and within a
+        # plausible cumulative dividend yield. A missing split shows up here as
+        # a factor-of-two or factor-of-seven miss, not as a rounding difference.
+        adj = r.get('adjusted_close')
+        if adj:
+            ratio = (r['close'] / k) / adj
+            worst = max(worst, abs(math.log(ratio)) if ratio > 0 else 99)
+    checks.append(('split reconciliation', worst))
+    return prices, rng, splits, checks
+
+
+def traded_range_by_fiscal_year(rng, cfg_like, first_year, last_year):
+    """Intra-month extremes rolled up to fiscal years, using the SAME
+    calendar-month-to-fiscal-year map the rest of the study uses. A second,
+    independently written definition of 'which months are in fiscal year y' is
+    exactly the shape of defect 8."""
+    out = {}
+    for fy in range(first_year, last_year + 1):
+        vals = [rng[k] for k in cfg_like.fiscal_months(fy) if k in rng]
+        if vals:
+            out[fy] = (min(v[0] for v in vals), max(v[1] for v in vals))
+    return out
+
 # ---------------------------------------------------------------------------
 class StudyConfig:
     """Everything that legitimately varies by company, and nothing else."""
@@ -211,7 +444,8 @@ class StudyConfig:
                  allow_statutory_excise_estimate=False,
                  withholding_in_repurchase_cash=None, raises=None,
                  plan_shares=None, raise_reconciling_items=None,
-                 coe_is_placeholder=True, notes=None, traded_range=None):
+                 coe_is_placeholder=True, notes=None, traded_range=None,
+                 eodhd_token=None, exchange='US'):
         self.__dict__.update(locals())
         del self.__dict__['self']
         self.splits = splits or []
@@ -271,57 +505,108 @@ def run(cfg, raw_path, fetch=False, csv_out=None):
         note('ABSENT TAG', f"{cfg.ticker} does not file {a} in any year")
 
     years = list(range(cfg.first_year, cfg.last_year + 1))
-    fin, missing = build_financials(raw, years)
+
+    # Prices and splits. Handing in a comma-separated file still works and is
+    # what the committed fixtures do, but the default is now to fetch both, and
+    # to CHECK the split list rather than trust a typed one.
+    if cfg.prices:
+        prices = load_prices(cfg.prices)
+        splits = cfg.splits
+        tr = None
+        if cfg.traded_range:
+            tr = {int(r['fiscal_year']): (float(r['intraday_low']), float(r['intraday_high']))
+                  for r in csv.DictReader(open(cfg.traded_range))}
+        else:
+            note('WEAKER CHECK', "no intra-period traded range supplied, so implied prices "
+                                 "are validated against period-end closes only, which is "
+                                 "the weaker test")
+    else:
+        prices, _rng, _fetched_splits, _chk = fetch_prices(
+            cfg.ticker, _eodhd_token(cfg.eodhd_token), cfg.first_year, cfg.last_year)
+        splits = cfg.splits or _fetched_splits
+        if cfg.splits and _fetched_splits and (
+                sorted(cfg.splits) != sorted(_fetched_splits)):
+            note('SPLITS DISAGREE',
+                 f"the configured split list {cfg.splits} is not the one the price vendor "
+                 f"reports, {_fetched_splits}. A missed split restates every share count in "
+                 "the window and the study still closes every identity it has. Resolve this "
+                 "before reading anything below.")
+        for _lab, _v in _chk:
+            if _lab == 'split reconciliation' and _v > 0.55:
+                note('SPLITS SUSPECT',
+                     f"split-adjusted closes diverge from the vendor's own adjusted series by "
+                     f"up to {100*(math.exp(_v)-1):.0f}%, which is far more than any plausible "
+                     "cumulative dividend yield. A split is probably missing.")
+        _cfgtmp = CompanyConfig(ticker=cfg.ticker, cik=cik, fy_end_month=cfg.fy_end_month,
+                                splits=splits, first_year=cfg.first_year,
+                                last_year=cfg.last_year)
+        tr = traded_range_by_fiscal_year(_rng, _cfgtmp, cfg.first_year, cfg.last_year)
+
+    # The split list has to exist before the statement lines are built: a
+    # per-share figure filed before a split has to be divided by it (defect 25).
+    _cfg_obj = CompanyConfig(ticker=cfg.ticker, cik=cik, fy_end_month=cfg.fy_end_month,
+                             splits=splits, first_year=cfg.first_year,
+                             last_year=cfg.last_year, coe_longrun=cfg.coe_longrun)
+    fin, missing, gaps = build_financials(raw, years, _cfg_obj)
     for m in missing:
         note('MISSING LINE', f"no element found for {m}; it is NOT treated as zero")
+    for g in gaps:
+        note('COVERAGE GAP', g)
+    if splits:
+        note('SPLITS APPLIED',
+             f"{len(splits)} split(s) {splits}: share counts are multiplied by the "
+             "cumulative factor and per-share amounts divided by it, both from each "
+             "fact's own filed date. A split after the end of the window still "
+             "restates every year in it.")
     sec = build_sec(raw)
-
-    # The treasury balance is filed under two names by companies that renamed it
-    # partway through (Home Depot and Boeing both did). Merge before use or the
-    # permanence label is decided on half a history.
     for base, alt in (('treasury_shares_balance', 'treasury_shares_balance_alt'),
                       ('treasury_value_balance', 'treasury_value_balance_alt')):
         if sec.get(base) and sec.get(alt):
             sec[base] = merge_concept_series([sec[base], sec[alt]], mode='update',
                                              expected_years=years, label=base)
 
-    prices = load_prices(cfg.prices)
-    # Intra-period extremes, not the range of period-end closes. Month-end
-    # closes alone produce false failures, and - more dangerous - they let a
-    # wrong implied price through when it happens to sit between two closes.
-    # The validator's limit is real and is worth stating: it CANNOT catch a
-    # contaminated numerator whose error is small relative to the traded range,
-    # which is how the American Airlines convertible nearly got through.
-    tr = None
-    if cfg.traded_range:
-        tr = {int(r['fiscal_year']): (float(r['intraday_low']), float(r['intraday_high']))
-              for r in csv.DictReader(open(cfg.traded_range))}
-    else:
-        note('WEAKER CHECK', "no intra-period traded range supplied, so implied prices are "
-                             "validated against period-end closes only, which is the weaker test")
     defl, extrap = load_deflator(cfg.deflator, cfg.first_year, cfg.last_year)
     if extrap:
-        note('DEFLATOR', f"no published index for {extrap}; the nearest published "
-                         "year is carried and every real figure in those years "
-                         "inherits that approximation")
-    coe = cfg.coe_by_year or {y: cfg.coe_longrun for y in range(cfg.first_year - 2,
-                                                               cfg.last_year + 2)}
+        note('DEFLATOR', f"no published index for {extrap}; the nearest published year is "
+                         "carried and every real figure in those years inherits that "
+                         "approximation")
+    # The cost of equity is an INPUT, not a property of the template. A scalar
+    # and a year-by-year series are equally acceptable here and the study's
+    # mechanics do not depend on which is supplied or on its level: the
+    # break-even rate published alongside every entry effect is the rate-free
+    # reading, and code/coe_invariance_test.py proves that swapping the rate
+    # moves only the quantities that are supposed to move.
+    coe = cfg.coe_by_year or {y: cfg.coe_longrun
+                              for y in range(cfg.first_year - 2, cfg.last_year + 2)}
     if cfg.coe_is_placeholder:
         note('COST OF EQUITY',
-             f"the {100*cfg.coe_longrun:.2f}% real cost of equity is a PLACEHOLDER, "
-             "not an engine-sourced rate for this ticker. It sets the SIGN of the "
-             "entry effect, so every figure that uses it is provisional. The "
-             "break-even rate below is the honest way to read it.")
+             f"the {100*cfg.coe_longrun:.2f}% real cost of equity is a PLACEHOLDER for this "
+             "ticker. It scales the capital charge and can move the SIGN of the entry "
+             "effect, so no sign should be quoted until a real series is supplied. It "
+             "changes no other mechanic: swap it and everything else recomputes.")
 
     study = BuybackStudy(
         CompanyConfig(ticker=cfg.ticker, cik=cik, fy_end_month=cfg.fy_end_month,
-                      splits=cfg.splits, first_year=cfg.first_year,
+                      splits=splits, first_year=cfg.first_year,
                       last_year=cfg.last_year, coe_longrun=cfg.coe_longrun),
         fin, sec, prices, defl, coe,
         engine={'coe_longrun': cfg.coe_longrun},
         raises=cfg.raises or [], plan_shares=cfg.plan_shares or {},
         raise_reconciling_items=cfg.raise_reconciling_items or {},
         withholding_in_repurchase_cash=cfg.withholding_in_repurchase_cash or {})
+    # Defect 15. "Pays no dividend" is asserted only on the evidence that no
+    # dividend element of any known name is filed in any year.
+    _div_elems = raw.get('__dividend_elements__')
+    if _div_elems is not None and not _div_elems:
+        study.dividends_are_zero = True
+        note('NO DIVIDEND', f"{cfg.ticker} files none of the "
+                            f"{len(DIVIDEND_EVIDENCE_TAGS)} dividend elements this driver "
+                            "checks, in any year. The dividend stream is taken as a "
+                            "genuine zero. That is a claim about the company; check it.")
+    elif _div_elems is None and 'dividends' not in fin:
+        note('REFUSAL', "no dividend series and no evidence either way - the fixture "
+                        "predates the dividend probe. Re-fetch with --fetch before "
+                        "trusting anything that uses distributions.")
     for n in cfg.notes:
         study.notes.append(n)
     study.run(traded_range=tr)
@@ -335,6 +620,11 @@ def run(cfg, raw_path, fetch=False, csv_out=None):
         note('FALLBACK', f"shares retired DERIVED, not filed, in {sorted(study.derived_years)} - "
                          "the count is a residual of the share-count identity and its implied "
                          "price is checked against the year's traded range, not its close")
+    if 'NONE FOUND' in (study.retired_tag or ''):
+        note('REFUSAL', "no retirement or treasury flow element is tagged by this company "
+                        "under any name this template knows. Probe the elements before "
+                        "assuming the company did not repurchase - it may simply file the "
+                        "flow under a name not yet in TAGS.")
     if study.unresolved_years:
         note('REFUSAL', f"{sorted(study.unresolved_years)} have no determinable share count and "
                         "are excluded from BOTH sides of every average, not just the share side")
@@ -356,6 +646,14 @@ def run(cfg, raw_path, fetch=False, csv_out=None):
     except (ValueError, KeyError) as exc:
         note('REFUSAL', f"entry effect not struck at all: {exc}")
         EE = None
+    if EE is None or not EE['tranches']:
+        note('REFUSAL', "NO ENTRY EFFECT IN THIS WINDOW: not one repurchase year has a "
+                        "retirement count, repurchase cash, a deflator and a following "
+                        "year's earnings together. An empty section is never printed as "
+                        "though it were an empty result.")
+        print("  NOT STRUCK IN ANY YEAR. See the refusals below.")
+        for y, why in sorted((EE or {}).get('excluded_years', {}).items()):
+            print(f"    FY{y}: {why}")
     if EE is not None and EE['tranches']:
         for t in EE['tranches']:
             print(f"  FY{t}  retired {study.retired[t]:8,.1f}mn  real px {EE['real_price_paid'][t]:9,.2f}  "
@@ -400,6 +698,12 @@ def run(cfg, raw_path, fetch=False, csv_out=None):
     print("-" * 100)
     NC = study.net_retirement_cost()
     print(f"  permanence read from the filings: {NC['basis'].upper()} - \"{NC['label']}\"")
+    if NC['net_reduction'] is not None and NC['net_reduction'] <= 0:
+        note('UNDEFINED MEASURE',
+             f"net share reduction over the window is {NC['net_reduction']:,.1f}mn - the "
+             "company ended with MORE shares outstanding than it started with. The cost "
+             "per share removed is undefined and is not reported; the program absorbed "
+             "issuance rather than reducing the count.")
     print(f"  {NC['permanence_note']}")
     for lab, k in (("A  cash / GROSS retired (the transacted price)", 'A_gross_price'),
                    (f"B  cash / NET reduction (cost per share {NC['label']})", 'B_per_share'),
@@ -472,7 +776,9 @@ def main(argv=None):
     p.add_argument('--ticker'); p.add_argument('--cik')
     p.add_argument('--fy-end-month', type=int)
     p.add_argument('--first-year', type=int); p.add_argument('--last-year', type=int)
-    p.add_argument('--coe', type=float); p.add_argument('--prices')
+    p.add_argument('--coe', type=float)
+    p.add_argument('--prices', help='CSV of monthly closes; omit to fetch')
+    p.add_argument('--eodhd-token')
     p.add_argument('--split-year', type=int)
     p.add_argument('--deflator', default='../AAPL_restated.csv')
     p.add_argument('--raw'); p.add_argument('--fetch', action='store_true')
@@ -487,13 +793,14 @@ def main(argv=None):
         cfg = StudyConfig.from_json(a.config)
     else:
         for req in ('ticker', 'cik', 'fy_end_month', 'first_year', 'last_year',
-                    'coe', 'prices'):
+                    'coe'):
             if getattr(a, req) is None:
                 raise SystemExit(f"--{req.replace('_', '-')} is required without --config")
         cfg = StudyConfig(ticker=a.ticker, cik=a.cik, fy_end_month=a.fy_end_month,
                           first_year=a.first_year, last_year=a.last_year,
                           coe_longrun=a.coe, prices=a.prices, deflator=a.deflator,
-                          split_year=a.split_year, traded_range=a.traded_range)
+                          split_year=a.split_year, traded_range=a.traded_range,
+                          eodhd_token=a.eodhd_token)
     raw_path = a.raw or f"{cfg.ticker.lower()}_sec_raw.json"
     run(cfg, raw_path, fetch=a.fetch, csv_out=a.csv_out)
 
