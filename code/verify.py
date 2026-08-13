@@ -11,6 +11,12 @@ and must reconcile before a sentence is written about what it means.
 import csv
 import html
 import re
+import sys
+
+# timing_decomposition.py and buyback_study_TEMPLATE.py both live at the
+# repository root, one directory up from here. The insert has to happen
+# before the first of those imports, not next to the later ones.
+sys.path.insert(0, '..')
 
 from build import *
 
@@ -380,6 +386,124 @@ OUT.append((_crm.treasury_status()['basis'] == 'treasury',
 OUT.append((_BS0(_CC0("X", "0", 12, [], 1, 2), {}, {}, {}, {}, {}).treasury_status()['basis']
             == 'undetermined',
             "permanence: a company tagging neither is UNDETERMINED, never silently 'retired'", 0, 0, ""))
+
+# ====== 5c-3. THE ENTRY EFFECT NOW COMES FROM THE TEMPLATE (added 2026-08-13)
+# CLOSE-OUT SESSION. The entry effect was the last measure in this study still
+# written out once per company - here in gen_article.py for Apple and again in
+# full_study_COST.py for Costco. It now lives in
+# buyback_study_TEMPLATE.entry_effect() and both drivers read it from there.
+#
+# THIS BLOCK IS THE PROOF THAT NOTHING MOVED. Everything above in sections 5b
+# and 5c is verify.py's own arithmetic, built from build.py and the primary
+# sources by a route that never touches gen_article. The template is now made to
+# reproduce it - every tranche, both totals, the break-even on all three
+# windows, the whole decomposition band - to floating-point exactness. If the
+# relocation had changed a single quantity these checks fail rather than the
+# change passing quietly, which is the failure mode this repository has met
+# eight times.
+#
+# The share flows handed to the template here are verify.py's independently
+# reconstructed _ret and _iss, NOT gen_article's, so this is not the template
+# checking itself against itself.
+_tpl_fin = {'net_income': NI, 'diluted_eps': EPS, 'dividends': DIV}
+_tpl_sec = {'repurchase_cash': {y: {'val': REPURCHASE_CASH[y] * 1e6,
+                                    'filed': '2026-01-01'} for y in FY}}
+_tpl = _BS0(_CC0(ticker="AAPL", cik="0000320193", fy_end_month=9,
+                 splits=[("2014-06-09", 7), ("2020-08-31", 4)],
+                 first_year=FY[0], last_year=FY[-1]),
+            _tpl_fin, _tpl_sec, PX, DEFL, COE, shares_out=SHARES_OUT)
+_tpl.retired, _tpl.issued = _ret, _iss
+_EE = _tpl.entry_effect(rho=R, coe_by_year=COE, split_year=2020)
+
+# (a) THE TRANCHE SET. The template must select exactly the years this file
+# selects, and must give a reason for every year it drops. FY2025 is dropped
+# because fiscal 2026 earnings do not exist yet, which is why the published
+# entry-effect table stops at FY2024.
+OUT.append((_EE['tranches'] == list(_yrs),
+            "template selects the same entry-effect tranches as this file",
+            len(_EE['tranches']), len(_yrs), "years"))
+OUT.append((set(_EE['excluded_years']) == {2025}
+            and 'fiscal 2026 earnings not reported' in _EE['excluded_years'][2025],
+            "template drops FY2025 for the stated reason, not silently",
+            len(_EE['excluded_years']), 1, "years"))
+
+# (b) THE REAL SERIES. The deflator is a multiplier; a template that divided by
+# it would produce a series that leans the wrong way with time and would not
+# trip any range check. Both real series are compared term by term.
+for _t in _yrs:
+    chk(f"  template real price paid FY{_t}", _EE['real_price_paid'][_t], _pxr[_t], 1e-12, "$/sh")
+for _y in range(2012, 2026):
+    chk(f"  template real EPS FY{_y}", _EE['real_eps'][_y], _epsr[_y], 1e-12, "$/sh")
+
+# (c) EVERY TRANCHE OF THE ENTRY EFFECT, AND BOTH TOTALS.
+for _t in _yrs:
+    chk(f"  template entry effect FY{_t}",
+        _EE['per_year'][_t], _ret[_t] * (_epsr[_t + 1] - R * _pxr[_t]), 1e-9, "$m")
+chk("template cumulative entry effect", _EE['total'], _entry_at(R, _yrs), 1e-9, "$m")
+chk("template entry effect on the company's own year-by-year cost of equity",
+    _EE['alt_total'],
+    sum(_ret[t] * (_epsr[t + 1] - COE[t] * _pxr[t]) for t in _yrs), 1e-9, "$m")
+OUT.append((_EE['negative_years'] == [t for t in _yrs if _entry_at(R, [t]) < 0],
+            "template flags the same negative-entry years",
+            len(_EE['negative_years']), len([t for t in _yrs if _entry_at(R, [t]) < 0]), "years"))
+
+# (d) THE BREAK-EVEN, ALL THREE WINDOWS, AGAINST THIS FILE'S BISECTION ROUTE.
+for _lab, _key, _yy in (("whole program", 'all', _yrs),
+                        ("FY2013-19", 'early', [t for t in _yrs if t < 2020]),
+                        ("FY2020-24", 'late', [t for t in _yrs if t >= 2020])):
+    chk(f"  template break-even vs bisection, {_lab}",
+        _EE['break_even_windows'][_key], _bisect(_yy), 1e-9, "/yr")
+chk("template headroom over the engine rate", _EE['headroom'], _rs - R, 1e-12, "/yr")
+
+# (e) THE ENTITY-LEVEL ABNORMAL EARNINGS GROWTH ACCOUNT AND THE CONTINUING
+# EFFECT, rebuilt here from the primary series rather than read back.
+_v_nir = {y: NI[y] * DEFL[y] for y in range(2012, 2026)}
+_v_dr = {y: (DIV[y] + REPURCHASE_CASH.get(y, 0)) * DEFL[y] for y in range(2012, 2026)}
+_v_aeg = {s: _v_nir[s] - (1 + R) * _v_nir[s - 1] + R * _v_dr[s - 1] for s in FY}
+for _s in FY:
+    chk(f"  template entity AEG FY{_s}", _EE['aeg_entity'][_s], _v_aeg[_s], 1e-9, "$m")
+for _t in _yrs:
+    chk(f"  template continuing effect FY{_t}", _EE['continuing'][_t],
+        sum(_ret[_t] * _v_aeg[s] / SHARES_OUT[s] for s in range(_t + 2, 2026)), 1e-9, "$m")
+
+# (f) THE WHOLE DECOMPOSITION BAND, under all six estimators.
+for _n in _td.ALL_ESTIMATORS:
+    chk(f"  template decomposition decision, {_n}",
+        _EE['band'][_n]['decision'], _td_band[_n]['decision'], 1e-9, "$m")
+    chk(f"  template decomposition timing, {_n}",
+        _EE['band'][_n]['timing'], _td_band[_n]['timing'], 1e-9, "$m")
+    chk(f"  template decomposition break-even, {_n}",
+        _EE['band'][_n]['break_even'], _td_band[_n]['break_even'], 1e-12, "/yr")
+chk("template timing dependence", _EE['timing_dependence'], _dep_p, 1e-12, "x")
+chk("template log-linear trend growth", _EE['trend_growth'],
+    _td_est['loglinear'].growth, 1e-12, "/yr")
+OUT.append((_EE['families_disagree_on_sign'],
+            "template sees the estimator families disagree on sign, as the report says",
+            1, 1, ""))
+
+# (g) THE EARNINGS SPAN IS A STATED CONVENTION, NOT WHATEVER THE SOURCE FILE
+# REACHES BACK TO. Apple's income statement carries every year from 1985. If the
+# template had taken all of it, the centred estimators would read neighbouring
+# years the published study never saw and the engine normalizer would walk back
+# from 1985, and both would have changed a published figure while every identity
+# check still closed. The span is first_year - 1 through last_year and this
+# proves it.
+OUT.append((_tpl.earnings_span() == list(range(2012, 2026)),
+            "template earnings span is the study window plus its opening year",
+            _tpl.earnings_span()[0], _tpl.earnings_span()[-1], ""))
+OUT.append((min(EPS) < 2012,
+            "  and the source statements do reach further back, so the span binds",
+            min(EPS), 2012, ""))
+
+# (h) THE RATE IS NEVER DEFAULTED. A capitalization rate that arrived by default
+# rather than by decision has twice determined the sign of a result in this
+# project. entry_effect() must refuse rather than choose one.
+try:
+    _tpl.entry_effect()
+    _refused = False
+except ValueError:
+    _refused = True
+OUT.append((_refused, "entry_effect() REFUSES to default the cost of equity", 1, 1, ""))
 
 # ================ 5d. THE ROUND TRIP (addendum item 3, added 2026-08-13)
 # Apple is the NULL case for this measure and that is exactly why it belongs here:

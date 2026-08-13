@@ -59,6 +59,8 @@ from datetime import date
 import csv
 import json
 
+import timing_decomposition
+
 SEC_CONCEPT = ("https://data.sec.gov/api/xbrl/companyconcept/"
                "CIK{cik}/us-gaap/{tag}.json")
 
@@ -729,24 +731,62 @@ class BuybackStudy:
 
     # ---------------------------------------------------------- attribution
     def eps_attribution(self):
+        """Growth in earnings per share split into its earnings and share-count
+        channels, and the earnings channel split again into operating and
+        financial.
+
+        DEFECT 13 FIX (2026-08-13, close-out session, found by running the
+        generic driver cold on Oracle). The operating/financial split needs a
+        pretax income figure to strike the effective tax rate on. Oracle tags
+        IncomeLossFromContinuingOperationsBeforeIncomeTaxes... for fiscal 2011
+        to 2018 and then stops, under either of its two element names. The old
+        code built `oi` and `nfi` only for the years it could, then read
+        `oi[y]` and `oi[y - 1]` unconditionally, and died with a bare KeyError
+        on the first year it could not.
+
+        The crash was the good outcome. The bad one is the shape of this bug in
+        general: a study that quietly dropped the years it could not split would
+        publish an attribution over a shorter window than the one named in its
+        own heading. So the FIRST TWO CHANNELS - which need no tax rate and are
+        the ones the study actually leans on - are computed for every year, and
+        the operating/financial split is filled in only where it is determinable
+        and set to None where it is not, with the years named in the notes. A
+        None is visible in every table it reaches; a silently shorter window is
+        not.
+        """
         f, S = self.fin, self.fin['wtd_diluted_shares']
         NI, EPS = f['net_income'], f['diluted_eps']
+        pre = f.get('pretax_income', {})
+        tax = f.get('tax_provision', {})
+        op = f.get('operating_income', {})
         oi, nfi = {}, {}
         for y in list(S):
-            if y in f['pretax_income'] and f['pretax_income'][y]:
-                t = f['tax_provision'][y] / f['pretax_income'][y]
-                oi[y] = f['operating_income'][y] * (1 - t)
-                nfi[y] = (f['pretax_income'][y] - f['operating_income'][y]) * (1 - t)
-        rows = {}
+            if pre.get(y) and tax.get(y) is not None and op.get(y) is not None:
+                t = tax[y] / pre[y]
+                oi[y] = op[y] * (1 - t)
+                nfi[y] = (pre[y] - op[y]) * (1 - t)
+        rows, unsplit = {}, []
         for y in self.years():
-            if (y - 1) not in S:
+            if (y - 1) not in S or y not in S:
                 continue
+            splittable = y in oi and (y - 1) in oi
+            if not splittable:
+                unsplit.append(y)
             rows[y] = {
                 'from_earnings': (NI[y] - NI[y - 1]) / S[y],
                 'from_share_count': EPS[y - 1] * (S[y - 1] / S[y] - 1),
-                'operating': (oi[y] - oi[y - 1]) / S[y],
-                'financial': (nfi[y] - nfi[y - 1]) / S[y],
+                'operating': ((oi[y] - oi[y - 1]) / S[y]) if splittable else None,
+                'financial': ((nfi[y] - nfi[y - 1]) / S[y]) if splittable else None,
             }
+        if unsplit:
+            self.notes.append(
+                "EARNINGS ATTRIBUTION NOT SPLIT into operating and financial for "
+                f"FY{unsplit}: pretax income, the tax provision or operating "
+                "income is untagged in that year or the one before it, so there "
+                "is no effective tax rate to strike the split on. The earnings "
+                "and share-count channels are unaffected and are computed for "
+                "every year; the split is reported as unavailable rather than "
+                "the years being dropped from the window.")
         self._oi = oi
         return rows
 
@@ -842,6 +882,335 @@ class BuybackStudy:
                 'allocation_across_years': dw / ew - 1,
                 'combined': dw / mk - 1,
                 'pe_paid': pe_paid, 'pe_market': pe_mkt}
+
+    # ============================================================ entry effect
+    # ADDENDUM ITEM 1, PULLED INTO THE TEMPLATE 2026-08-13 (close-out session).
+    #
+    # The entry effect was the last measure in this study still written out once
+    # per company. It lived twice: in code/gen_article.py for Apple and in
+    # code/full_study_COST.py for Costco. Two definitions of one quantity is the
+    # exact shape of the defect this repository has been bitten by repeatedly -
+    # a number that is internally consistent, passes every gate, and is wrong in
+    # one of its two homes. Items 4 and 5 removed the same duplication for the
+    # net retirement cost and the excise tax; this closes the set.
+    #
+    # WHAT THE MEASURE IS. For a repurchase tranche struck in fiscal year t,
+    #
+    #     entry[t] = shares_retired[t] * (real_eps[t+1] - rho * real_price[t])
+    #
+    # the earnings the retired shares carried in the year that followed, less
+    # the capital charge on the cash actually spent. The pivot is Neutral Value,
+    # not Intrinsic Value, and the study states no estimate of the latter. It is
+    # ex-post disclosure: it moves no valuation number, it is not a price, it is
+    # not an expense, and the net retirement cost is never substituted into it.
+    #
+    # WHAT IS NEW HERE IS NOTHING ARITHMETIC. Every formula below is the one
+    # already published. What is new is that there is now one copy of it, that
+    # the guards are the template's rather than each driver's, and that a driver
+    # which forgets a guard cannot silently do without it.
+
+    def earnings_span(self):
+        """The years the real earnings series is defined over: the study window
+        and the single year before it.
+
+        The span is NOT "every year the statements happen to reach back to",
+        and the difference is not cosmetic. Two of the three trend estimators
+        behind the earnings-timing decomposition read neighbouring years out of
+        this series - the centred geometric mean takes a window either side of
+        the year it is evaluating, and the engine normalizer walks back from the
+        earliest year present. Feeding one company forty years of history and
+        another twelve would make their decompositions incomparable, and would
+        silently change a published number the day somebody extended a source
+        file backwards. The span is a stated convention: `first_year - 1`
+        through `last_year`, the same years the abnormal earnings growth
+        recursion needs, and nothing else.
+
+        Override `span` on the instance where a company genuinely warrants a
+        different one, and say so in the study.
+        """
+        sp = getattr(self, 'span', None)
+        if sp is not None:
+            return list(sp)
+        return list(range(self.cfg.first_year - 1, self.cfg.last_year + 1))
+
+    def real_eps(self):
+        """Diluted earnings per share in base-year dollars.
+
+        The deflator is a MULTIPLIER - nominal times deflator equals base-year
+        dollars. It is stated that way on the committed deflator row and it is
+        used that way everywhere else in this file. A driver that divides by it
+        instead produces a real series that leans the wrong way with time, and
+        because the error is smooth and small in any single year it will not
+        trip a range check. Reading the series from here removes the choice.
+        """
+        e = self.fin['diluted_eps']
+        return {y: e[y] * self.deflator[y] for y in self.earnings_span()
+                if e.get(y) is not None and y in self.deflator}
+
+    def real_net_income(self):
+        ni = self.fin['net_income']
+        return {y: ni[y] * self.deflator[y] for y in self.earnings_span()
+                if ni.get(y) is not None and y in self.deflator}
+
+    def real_distributions(self):
+        """Dividends plus repurchase cash, real. The cum-dividend term in the
+        entity-level abnormal earnings growth recursion."""
+        rep = {y: e['val'] / 1e6
+               for y, e in self.sec.get('repurchase_cash', {}).items()}
+        d = self.fin['dividends']
+        return {y: (d[y] + rep.get(y, 0.0)) * self.deflator[y]
+                for y in self.earnings_span()
+                if d.get(y) is not None and y in self.deflator}
+
+    def aeg_entity(self, rho, years=None):
+        """Entity-level abnormal earnings growth, real, cum-dividend form:
+
+            AEG(s) = NI_r(s) - (1 + rho) * NI_r(s-1) + rho * D_r(s-1)
+
+        A year whose predecessor is missing is skipped rather than given a
+        substitute predecessor, and the skip is reported by its absence from
+        the returned keys - the caller can see which years are there.
+        """
+        ni, dr = self.real_net_income(), self.real_distributions()
+        ys = self.years() if years is None else years
+        return {s: ni[s] - (1 + rho) * ni[s - 1] + rho * dr[s - 1]
+                for s in ys
+                if s in ni and (s - 1) in ni and (s - 1) in dr}
+
+    def entry_tranches(self):
+        """The repurchase years on which an entry effect can honestly be struck,
+        and a reason for every year excluded.
+
+        Four things must hold. The company must have retired shares that year;
+        there must be repurchase cash net of any employee tax withholding
+        folded into the same line (DEFECT 10 - American Airlines tags $18m and
+        $21m in fiscal 2021 and 2022 that is entirely withholding, and without
+        this guard the study would publish American Airlines repurchasing in
+        years it was contractually barred from doing so); the deflator must
+        cover the year; and the FOLLOWING year's earnings must actually have
+        been reported, because the measure is struck on them. The last is why
+        the final year of every study is absent from the entry-effect table.
+
+        Returns (tranches, excluded) where excluded is {year: reason}.
+        """
+        eps = self.real_eps()
+        tranches, excluded = [], {}
+        for y in self.years():
+            q = self.retired.get(y)
+            if not q:
+                excluded[y] = 'no shares retired'
+                continue
+            cash = self.sec.get('repurchase_cash', {}).get(y, {}).get('val')
+            if cash is None:
+                excluded[y] = 'no repurchase cash tagged'
+                continue
+            cash = cash / 1e6 - self.withholding_in_repurchase_cash.get(y, 0.0)
+            if cash <= 0:
+                excluded[y] = ('repurchase cash is nil net of employee tax '
+                               'withholding on the same line (defect 10)')
+                continue
+            if y not in self.deflator:
+                excluded[y] = 'no deflator for the year'
+                continue
+            if eps.get(y + 1) is None:
+                excluded[y] = (f'fiscal {y + 1} earnings not reported, so there '
+                               'is no year following the purchase to strike the '
+                               'measure on')
+                continue
+            tranches.append(y)
+        return tranches, excluded
+
+    def entry_effect(self, rho=None, tranches=None, split_year=None,
+                     coe_by_year=None, estimator_window=None,
+                     per_share_base=None, decompose=True):
+        """The entry effect, its break-even rate, the entity-level abnormal
+        earnings growth account behind the continuing effect, and the
+        earnings-timing decomposition, in one place.
+
+        `rho` is the flat long-run real cost of equity the headline is struck
+        at. It is NOT defaulted: a capitalization rate silently supplied is
+        precisely the failure mode this project keeps meeting, so an absent rate
+        refuses rather than guesses.
+
+        `coe_by_year` optionally supplies the company's own year-by-year real
+        cost of equity, which produces the alternative reading published
+        alongside the headline. Absent, that reading is None rather than a copy
+        of the headline wearing a different name.
+
+        `split_year` asks for the break-even rate on the tranches before and
+        from that year as well as on all of them. Which year to split at is an
+        editorial judgment about the company and stays with the driver; the
+        arithmetic does not.
+
+        `per_share_base` is the share count the continuing effect divides by.
+        Default is shares outstanding, which is what the published Apple study
+        uses. A driver with only a weighted diluted count may pass it, and the
+        choice is recorded in the returned dictionary so it cannot be lost.
+        """
+        if rho is None:
+            raise ValueError(
+                "entry_effect() needs an explicit real cost of equity. It will "
+                "not default one: the capitalization rate sets the SIGN of this "
+                "measure, and a rate that arrived by default rather than by "
+                "decision has twice been the defect in this project.")
+        eps, px = self.real_eps(), {}
+        auto, excluded = self.entry_tranches()
+        if tranches is None:
+            tranches = auto
+        else:
+            excluded = {y: r for y, r in excluded.items() if y not in tranches}
+        for t in tranches:
+            p = self.real_repurchase_price(t)
+            if p is None:
+                raise ValueError(f"tranche {t} has no real repurchase price; it "
+                                 "should have been excluded, not priced")
+            px[t] = p
+
+        per_year = {t: self.retired[t] * (eps[t + 1] - rho * px[t])
+                    for t in tranches}
+        total = sum(per_year.values())
+        negative = [t for t in tranches if per_year[t] < 0]
+
+        alt_per_year = alt_total = alt_negative = None
+        if coe_by_year:
+            alt_per_year = {t: self.retired[t] * (eps[t + 1] - coe_by_year[t] * px[t])
+                            for t in tranches if t in coe_by_year}
+            alt_total = sum(alt_per_year.values())
+            alt_negative = [t for t in alt_per_year if alt_per_year[t] < 0]
+
+        # The break-even rate. The entry effect is LINEAR in rho, so it has
+        # exactly one root and that root is the retirement-weighted forward real
+        # earnings yield on the tranches. No search, no tolerance, no iteration
+        # - it is an identity, and it is the only sensitivity in this study that
+        # moves a SIGN rather than a magnitude.
+        def _root(ys):
+            den = sum(self.retired[t] * px[t] for t in ys)
+            if not den:
+                return None
+            return sum(self.retired[t] * eps[t + 1] for t in ys) / den
+
+        break_even = _root(tranches)
+        windows = {'all': break_even}
+        if split_year is not None:
+            early = [t for t in tranches if t < split_year]
+            late = [t for t in tranches if t >= split_year]
+            windows['early'] = _root(early) if early else None
+            windows['late'] = _root(late) if late else None
+
+        # The continuing effect: what the retired shares would have earned in
+        # every year after the one the entry effect is struck on.
+        base = per_share_base if per_share_base is not None else self.shares_outstanding()
+        aeg = self.aeg_entity(rho)
+        continuing = {}
+        for t in tranches:
+            continuing[t] = sum(
+                self.retired[t] * aeg[s] / base[s]
+                for s in range(t + 2, self.cfg.last_year + 1)
+                if s in aeg and base.get(s))
+        aeg_ps = {s: aeg[s] / base[s] for s in self.years()
+                  if s in aeg and base.get(s)}
+        # Summed in sorted order so the result does not depend on dictionary
+        # insertion order. Floating-point addition is not associative and a mean
+        # that moves when a driver reorders its inputs is not reproducible.
+        _v = sorted(aeg_ps.values())
+        mean_aeg_ps = (sum(_v) / len(_v)) if _v else None
+
+        out = {
+            'rho': rho,
+            'tranches': tranches,
+            'excluded_years': excluded,
+            'real_eps': eps,
+            'real_price_paid': px,
+            'per_year': per_year,
+            'total': total,
+            'negative_years': negative,
+            'alt_per_year': alt_per_year,
+            'alt_total': alt_total,
+            'alt_negative_years': alt_negative,
+            'break_even': break_even,
+            'break_even_windows': windows,
+            'headroom': (break_even - rho) if break_even is not None else None,
+            'aeg_entity': aeg,
+            'aeg_per_share': aeg_ps,
+            'mean_aeg_per_share': mean_aeg_ps,
+            'per_share_base': ('shares outstanding' if per_share_base is None
+                               else 'supplied by the driver'),
+            'continuing': continuing,
+            'continuing_total': sum(continuing.values()),
+            'band': None, 'primary': None, 'timing_dependence': None,
+            'identity_residual': None, 'decomposition_note': None,
+        }
+        for y, why in sorted(excluded.items()):
+            self.notes.append(f"entry effect, fiscal {y} not struck: {why}")
+
+        if decompose:
+            self._decompose_entry(out, estimator_window)
+        return out
+
+    # The earnings-timing decomposition, entry[t] = decision[t] + timing[t].
+    # It splits the published figure and corrects nothing: no tranche is
+    # dropped, no year is excluded, and the two parts sum to the entry effect
+    # exactly. The timing term contains no rate at all, so the diagnostic is
+    # rate-agnostic by construction. The trend level is not point-identified and
+    # the disagreement between the symmetric and backward-looking estimator
+    # families is itself the published result - see
+    # docs/METHODOLOGY-ADDENDUM-Earnings-Timing-Decomposition-2026-08-13.md.
+    def _decompose_entry(self, out, estimator_window=None):
+        eps, tranches = out['real_eps'], out['tranches']
+        window = (estimator_window if estimator_window is not None
+                  else [y for y in self.years() if eps.get(y) is not None])
+        positive = [y for y in window if eps.get(y) is not None and eps[y] > 0]
+        if len(positive) < 3 or not tranches:
+            out['decomposition_note'] = (
+                "the earnings-timing decomposition is not computed: it needs at "
+                f"least three positive real earnings observations and at least "
+                f"one tranche, and this company offers {len(positive)} and "
+                f"{len(tranches)}. This is reported, not worked around.")
+            self.notes.append("ENTRY EFFECT: " + out['decomposition_note'])
+            return out
+        shares = {t: self.retired[t] for t in tranches}
+        est = timing_decomposition.build_estimators(eps, window=window)
+        band = timing_decomposition.decomposition_band(
+            shares, eps, out['real_price_paid'], out['rho'], tranches, est)
+        out['estimators'] = est
+        out['band'] = band
+        out['primary'] = band['loglinear']
+        out['trend_growth'] = est['loglinear'].growth
+        out['identity_residual'] = max(
+            abs(d['decision'] + d['timing'] - d['entry']) for d in band.values())
+        out['timing_dependence'] = timing_decomposition.timing_dependence(
+            out['primary']['entry'], out['primary']['timing'])
+        sym = [band[n] for n in timing_decomposition.SYMMETRIC_ESTIMATORS]
+        bwd = [band[n] for n in timing_decomposition.BACKWARD_ESTIMATORS]
+        out['symmetric_decision'] = (min(d['decision'] for d in sym),
+                                     max(d['decision'] for d in sym))
+        out['backward_decision'] = (min(d['decision'] for d in bwd),
+                                    max(d['decision'] for d in bwd))
+        out['symmetric_break_even'] = (min(d['break_even'] for d in sym),
+                                       max(d['break_even'] for d in sym))
+        out['backward_break_even'] = (min(d['break_even'] for d in bwd),
+                                      max(d['break_even'] for d in bwd))
+        out['families_disagree_on_sign'] = (
+            min(d['decision'] for d in sym) * max(d['decision'] for d in bwd) < 0)
+        if out['timing_dependence'] >= 1.0:
+            self.notes.append(
+                "ENTRY EFFECT, TIMING DEPENDENCE AT OR ABOVE 100 PERCENT: the "
+                "accident of which earnings year followed each purchase is "
+                "larger than the headline it sits inside. The entry effect must "
+                "not be read as a verdict on the price paid for this company; "
+                "publish the decomposition beside it, never the headline alone.")
+        elif out['timing_dependence'] >= 0.5:
+            self.notes.append(
+                "ENTRY EFFECT, TIMING DEPENDENCE ELEVATED: earnings timing "
+                "carries a large share of the verdict. Publish the "
+                "decomposition alongside the entry effect.")
+        if out['families_disagree_on_sign']:
+            self.notes.append(
+                "ENTRY EFFECT: the symmetric and backward-looking trend "
+                "estimator families disagree on the SIGN of the price-decision "
+                "component. The trend level is not point-identified on this "
+                "company; publish the band rather than a point.")
+        return out
 
     # ------------------------------------------------- treasury permanence
     # ADDENDUM ITEM 4, built 2026-08-13. Section 7's measure divides cash by the

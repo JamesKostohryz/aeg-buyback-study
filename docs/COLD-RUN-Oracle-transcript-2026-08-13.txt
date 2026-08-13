@@ -1,0 +1,114 @@
+====================================================================================================
+ORCL  FY2013-FY2025   CIK 0001341439
+retired tag = StockRepurchasedAndRetiredDuringPeriodShares   unresolved = []   derived = []   price failures = []
+====================================================================================================
+ORCL  FY2013-FY2025
+----------------------------------------------------------------
+cash spent                   149,933
+shares retired                 3,057 mn
+dollar-wtd price paid          49.05
+dollar-wtd P/E paid            21.70
+
+execution within year          -1.2%
+allocation across yrs         -10.7%
+
+dilution offset                31.4%  of shares retired
+comp economic cost            48,403
+comp accounting chg           26,375
+wedge                         22,028  (1.84x)
+
+WHAT A SHARE COST  (retired)
+  A gross price paid             49.05
+  B cash / net                   71.46   per share permanently removed
+  C less plan proceeds           63.64
+  D plus withholding             67.44
+  suppressed years: FY2017, FY2023, FY2024, FY2025
+
+ROUND TRIP (real, base-year dollars)
+  no equity raised inside the window - nothing to match
+
+NOTES
+  - net issuance observable in 13 year(s); years without a filed retirement count are held at the rate observed in the earliest 3 observable year(s) (FY2013, FY2014, FY2015), 1.840% of opening shares - NOT the mean of the whole observed window, which would extrapolate a later trend backward
+  - EARNINGS ATTRIBUTION NOT SPLIT into operating and financial for FY[2019, 2020, 2021, 2022, 2023, 2024, 2025]: pretax income, the tax provision or operating income is untagged in that year or the one before it, so there is no effective tax rate to strike the split on. The earnings and share-count channels are unaffected and are computed for every year; the split is reported as unavailable rather than the years being dropped from the window.
+  - round trip: this company issued no equity inside the window, so there is no round trip to measure. Every round-trip total is a true zero, not a missing value.
+
+----------------------------------------------------------------------------------------------------
+ENTRY EFFECT, BREAK-EVEN, AND THE EARNINGS-TIMING DECOMPOSITION
+----------------------------------------------------------------------------------------------------
+  FY2013  retired    346.1mn  real px     45.81  real EPS(t+1)    3.369  fwd yield   7.35%  entry    +0.294bn
+  FY2014  retired    280.0mn  real px     49.61  real EPS(t+1)    3.125  fwd yield   6.30%  entry    +0.111bn
+  FY2015  retired    194.0mn  real px     58.94  real EPS(t+1)    2.890  fwd yield   4.90%  entry    -0.068bn
+  FY2016  retired    271.9mn  real px     53.61  real EPS(t+1)    3.062  fwd yield   5.71%  entry    +0.031bn
+  FY2017  retired     85.6mn  real px     56.88  real EPS(t+1)    1.134  fwd yield   1.99%  entry    -0.171bn
+  FY2018  retired    238.0mn  real px     63.63  real EPS(t+1)    3.893  fwd yield   6.12%  entry    +0.094bn
+  FY2019  retired    733.8mn  real px     64.56  real EPS(t+1)    3.988  fwd yield   6.18%  entry    +0.321bn
+  FY2020  retired    361.0mn  real px     69.01  real EPS(t+1)    5.627  fwd yield   8.15%  entry    +0.661bn
+  FY2021  retired    329.2mn  real px     78.65  real EPS(t+1)    2.760  fwd yield   3.51%  entry    -0.515bn
+  FY2022  retired    185.8mn  real px    100.14  real EPS(t+1)    3.377  fwd yield   3.37%  entry    -0.396bn
+  FY2023  retired     17.0mn  real px     84.11  real EPS(t+1)    3.963  fwd yield   4.71%  entry    -0.011bn
+  FY2024  retired     10.6mn  real px    121.14  real EPS(t+1)    4.518  fwd yield   3.73%  entry    -0.023bn
+  CUMULATIVE +0.328bn at 5.50% real
+  break-even real cost of equity: 5.67%  (headroom +0.17 points)
+    early  tranches: 6.00%
+    late   tranches: 5.11%
+
+  real EPS trend +3.03%/yr; identity residual 2.84e-13
+  estimator     family         decision    timing   dec b/e
+  loglinear     symmetric        -0.772    +1.100     5.10%
+  centered3     symmetric        -1.025    +1.352     4.98%
+  centered2     symmetric        -0.877    +1.205     5.05%
+  normalizer4   backward         +1.315    -0.987     6.17%
+  normalizer6   backward         -0.940    +1.267     5.02%
+  normalizer8   backward         +0.290    +0.038     5.65%
+  TIMING DEPENDENCE 336% of the headline
+
+----------------------------------------------------------------------------------------------------
+NET RETIREMENT COST, AND WHETHER THE REMOVAL IS PERMANENT
+----------------------------------------------------------------------------------------------------
+  permanence read from the filings: RETIRED - "permanently removed"
+  These shares were cancelled. The reduction is permanent and cannot be reversed without a new issuance.
+  A  cash / GROSS retired (the transacted price)             49.05
+  B  cash / NET reduction (cost per share permanently removed) 71.46
+  C  (cash - plan proceeds) / NET                            63.64
+  D  (cash + withholding - proceeds) / NET                   67.44
+
+----------------------------------------------------------------------------------------------------
+EXCISE TAX ON NET REPURCHASES (Internal Revenue Code section 4501)
+----------------------------------------------------------------------------------------------------
+  REFUSED: ORCL FY2023 is 42% exposed to the section 4501 excise on net repurchases and no filed figure for it was found, in the us-gaap tag or in anything handed in through `disclosed`. It is NOT zero. Either supply the filed figure or set allow_statutory_estimate=True and publish the reconstruction as an announced estimate.
+
+====================================================================================================
+REFUSALS, FALLBACKS AND SUPPRESSIONS
+====================================================================================================
+  [ABSENT TAG] ORCL does not file treasury_shares_acquired (TreasuryStockSharesAcquired) in any year
+  [ABSENT TAG] ORCL does not file treasury_value_acquired (TreasuryStockValueAcquiredCostMethod) in any year
+  [ABSENT TAG] ORCL does not file shares_issued (CommonStockSharesIssued) in any year
+  [ABSENT TAG] ORCL does not file treasury_shares_balance (TreasuryStockShares) in any year
+  [ABSENT TAG] ORCL does not file equity_raise_cash_flow (ProceedsFromIssuanceOrSaleOfEquity) in any year
+  [ABSENT TAG] ORCL does not file equity_raise_cash_flow_warrants (ProceedsFromIssuanceOfCommonStockAndWarrants) in any year
+  [ABSENT TAG] ORCL does not file treasury_shares_balance_alt (TreasuryStockCommonShares) in any year
+  [ABSENT TAG] ORCL does not file treasury_value_balance (TreasuryStockValue) in any year
+  [ABSENT TAG] ORCL does not file treasury_value_balance_alt (TreasuryStockCommonValue) in any year
+  [ABSENT TAG] ORCL does not file treasury_shares_reissued (StockIssuedDuringPeriodSharesTreasuryStockReissued) in any year
+  [ABSENT TAG] ORCL does not file excise_tax (ShareRepurchaseProgramExciseTax) in any year
+  [ABSENT TAG] ORCL does not file pretax_income__1 (IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments) in any year
+  [ABSENT TAG] ORCL does not file dividends__0 (PaymentsOfDividends) in any year
+  [ABSENT TAG] ORCL does not file total_debt_nc__0 (LongTermDebtNoncurrent) in any year
+  [ABSENT TAG] ORCL does not file total_debt_c__0 (LongTermDebtCurrent) in any year
+  [MISSING LINE] no element found for total_debt_nc (LongTermDebtNoncurrent); it is NOT treated as zero
+  [MISSING LINE] no element found for total_debt_c (LongTermDebtCurrent); it is NOT treated as zero
+  [DEFLATOR] no published index for [2026]; the nearest published year is carried and every real figure in those years inherits that approximation
+  [COST OF EQUITY] the 5.50% real cost of equity is a PLACEHOLDER, not an engine-sourced rate for this ticker. It sets the SIGN of the entry effect, so every figure that uses it is provisional. The break-even rate below is the honest way to read it.
+  [SUPPRESSED YEAR] FY2025 carries no entry effect: fiscal 2026 earnings not reported, so there is no year following the purchase to strike the measure on
+  [DIAGNOSTIC] timing dependence AT OR ABOVE 100%: the accident of which earnings year followed each purchase is larger than the headline it sits inside. The entry effect must not be read as a verdict on the price paid for this company.
+  [DIAGNOSTIC] the symmetric and backward-looking trend families disagree on the SIGN of the price decision; the trend level is not point-identified on this company. Publish the band.
+  [SUPPRESSED YEAR] net retirement cost suppressed in FY[2017, 2023, 2024, 2025]: the net reduction is below 0.25% of opening shares, and a ratio on a small or negative denominator is meaningless and far more likely to be believed than a missing one
+  [REFUSAL] excise tax REFUSED: ORCL FY2023 is 42% exposed to the section 4501 excise on net repurchases and no filed figure for it was found, in the us-gaap tag or in anything handed in through `disclosed`. It is NOT zero. Either supply the filed figure or set allow_statutory_estimate=True and publish the reconstruction as an announced estimate.. The driver did not opt in to a statutory estimate, so no number is produced. This is the default and it is correct: no company in this study has been found disclosing one.
+  [TEMPLATE NOTE] net issuance observable in 13 year(s); years without a filed retirement count are held at the rate observed in the earliest 3 observable year(s) (FY2013, FY2014, FY2015), 1.840% of opening shares - NOT the mean of the whole observed window, which would extrapolate a later trend backward
+  [TEMPLATE NOTE] EARNINGS ATTRIBUTION NOT SPLIT into operating and financial for FY[2019, 2020, 2021, 2022, 2023, 2024, 2025]: pretax income, the tax provision or operating income is untagged in that year or the one before it, so there is no effective tax rate to strike the split on. The earnings and share-count channels are unaffected and are computed for every year; the split is reported as unavailable rather than the years being dropped from the window.
+  [TEMPLATE NOTE] round trip: this company issued no equity inside the window, so there is no round trip to measure. Every round-trip total is a true zero, not a missing value.
+  [TEMPLATE NOTE] entry effect, fiscal 2025 not struck: fiscal 2026 earnings not reported, so there is no year following the purchase to strike the measure on
+  [TEMPLATE NOTE] ENTRY EFFECT, TIMING DEPENDENCE AT OR ABOVE 100 PERCENT: the accident of which earnings year followed each purchase is larger than the headline it sits inside. The entry effect must not be read as a verdict on the price paid for this company; publish the decomposition beside it, never the headline alone.
+  [TEMPLATE NOTE] ENTRY EFFECT: the symmetric and backward-looking trend estimator families disagree on the SIGN of the price-decision component. The trend level is not point-identified on this company; publish the band rather than a point.
+====================================================================================================
+30 guard message(s). A refusal is a pass.

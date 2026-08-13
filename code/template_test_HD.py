@@ -267,6 +267,165 @@ check("item 4 - a company tagging neither is UNDETERMINED, not silently 'retired
       and _unk.treasury_status()['holds_treasury'] is None,
       "absence of a treasury tag is not evidence of cancellation")
 
+# =============================================================================
+# DEFECT 13, AND THE COLD RUN (added 2026-08-13, close-out session)
+# =============================================================================
+# These checks are in the template's regression gate rather than in a fifth CI
+# job because they are about the TEMPLATE, not about a company. Home Depot is
+# the fixture that proves the template survives a company it was not written
+# for; Oracle is now the second, and it is here because running it cold is what
+# found defect 13 in the first place.
+#
+# DEFECT 13. eps_attribution() split the earnings channel into operating and
+# financial by striking an effective tax rate off pretax income. It built that
+# rate only for the years it could, then read the result unconditionally, and
+# died with a bare KeyError on the first year it could not. Oracle stops tagging
+# IncomeLossFromContinuingOperationsBeforeIncomeTaxes... after fiscal 2018,
+# under either of its two element names, so the generic driver crashed on the
+# first company it was pointed at. The crash was the good outcome; the shape of
+# the bug in general is a study that quietly drops the years it cannot split and
+# publishes an attribution over a shorter window than the one in its heading.
+print()
+print("--- defect 13: a missing pretax income line must not crash or shorten the window ---")
+
+_d13_fin = {
+    'net_income':         {y: 1000.0 + 50 * (y - 2013) for y in range(2012, 2026)},
+    'diluted_eps':        {y: 1.00 + 0.05 * (y - 2013) for y in range(2012, 2026)},
+    'wtd_diluted_shares': {y: 1000.0 - 10 * (y - 2013) for y in range(2012, 2026)},
+    'operating_income':   {y: 1200.0 + 60 * (y - 2013) for y in range(2012, 2026)},
+    'tax_provision':      {y: 300.0 for y in range(2012, 2026)},
+    # tagged to 2018 and then not, exactly as Oracle files it
+    'pretax_income':      {y: 1300.0 + 65 * (y - 2013) for y in range(2012, 2019)},
+    'dividends':          {y: 200.0 for y in range(2012, 2026)},
+    'common_equity':      {y: 5000.0 for y in range(2012, 2026)},
+    'total_debt':         {y: 2000.0 for y in range(2012, 2026)},
+}
+_d13 = BuybackStudy(
+    CompanyConfig(ticker="D13", cik="0000000000", fy_end_month=12, splits=[],
+                  first_year=2013, last_year=2025),
+    _d13_fin, {'repurchase_cash': {}}, {}, {y: 1.0 for y in range(2011, 2027)},
+    {y: 0.05 for y in range(2011, 2027)})
+_d13_rows = _d13.eps_attribution()
+check("defect 13: attribution covers the whole window, not just the splittable years",
+      sorted(_d13_rows) == list(range(2013, 2026)),
+      f"{len(_d13_rows)} years, FY{min(_d13_rows)}-FY{max(_d13_rows)}")
+check("defect 13: the two channels that need no tax rate are computed in every year",
+      all(r['from_earnings'] is not None and r['from_share_count'] is not None
+          for r in _d13_rows.values()))
+check("defect 13: the operating/financial split is None where it is not determinable",
+      all(_d13_rows[y]['operating'] is None for y in range(2020, 2026))
+      and _d13_rows[2018]['operating'] is not None,
+      "None is visible in a table; a dropped year is not")
+check("defect 13: the years without a split are NAMED in the notes",
+      any('EARNINGS ATTRIBUTION NOT SPLIT' in n for n in _d13.notes))
+
+# THE ENTRY EFFECT'S OWN GUARDS, on the template rather than on Apple.
+print()
+print("--- the entry effect refuses rather than guesses ---")
+_ee_sec = {'repurchase_cash': {y: {'val': 1000e6, 'filed': '2026-01-01'}
+                               for y in range(2013, 2026)}}
+_ee = BuybackStudy(
+    CompanyConfig(ticker="EE", cik="0000000000", fy_end_month=12, splits=[],
+                  first_year=2013, last_year=2025),
+    _d13_fin, _ee_sec, {}, {y: 1.0 for y in range(2011, 2027)},
+    {y: 0.05 for y in range(2011, 2027)},
+    shares_out={y: 1000.0 - 10 * (y - 2013) for y in range(2012, 2026)})
+_ee.retired = {y: 10.0 for y in range(2013, 2026)}
+_ee.issued = {y: 2.0 for y in range(2013, 2026)}
+
+_refused = False
+try:
+    _ee.entry_effect()
+except ValueError:
+    _refused = True
+check("entry_effect() refuses to default the cost of equity", _refused,
+      "a rate that arrives by default rather than by decision has twice "
+      "determined the sign of a result in this project")
+
+_EE = _ee.entry_effect(rho=0.05)
+check("entry effect drops the final year and says why",
+      _EE['tranches'] == list(range(2013, 2025))
+      and 2025 in _EE['excluded_years'],
+      _EE['excluded_years'].get(2025, ''))
+check("the break-even is the exact root: the entry effect is zero at it",
+      abs(sum(_ee.retired[t] * (_EE['real_eps'][t + 1]
+                                - _EE['break_even'] * _EE['real_price_paid'][t])
+              for t in _EE['tranches'])) < 1e-8)
+check("decision + timing == entry, every estimator, to floating-point exactness",
+      _EE['identity_residual'] < 1e-6, f"residual {_EE['identity_residual']:.2e}")
+check("the deflator is applied as a MULTIPLIER, not a divisor",
+      abs(_ee.real_eps()[2020] - _d13_fin['diluted_eps'][2020] * 1.0) < 1e-12)
+
+# DEFECT 10 inside the entry effect: a year whose only repurchase cash is
+# employee tax withholding on the same line is not a repurchase year.
+_ee2 = BuybackStudy(
+    CompanyConfig(ticker="EE2", cik="0000000000", fy_end_month=12, splits=[],
+                  first_year=2013, last_year=2025),
+    _d13_fin, _ee_sec, {}, {y: 1.0 for y in range(2011, 2027)},
+    {y: 0.05 for y in range(2011, 2027)},
+    shares_out={y: 1000.0 - 10 * (y - 2013) for y in range(2012, 2026)},
+    withholding_in_repurchase_cash={2018: 1000.0})
+_ee2.retired = {y: 10.0 for y in range(2013, 2026)}
+_ee2.issued = {y: 2.0 for y in range(2013, 2026)}
+_t2, _x2 = _ee2.entry_tranches()
+check("defect 10 inside the entry effect: a withholding-only year is refused",
+      2018 not in _t2 and 'withholding' in _x2.get(2018, ''),
+      _x2.get(2018, 'NOT REFUSED'))
+
+# THE EARNINGS SPAN IS A CONVENTION, not whatever the source file reaches back
+# to. Two of the three trend estimators read neighbouring years out of this
+# series, so a company handed forty years of history and another handed twelve
+# would not be comparable - and extending a source file backwards would silently
+# move a published figure.
+_ee.fin = dict(_d13_fin)
+_ee.fin['diluted_eps'] = {y: 1.0 for y in range(1985, 2026)}
+check("the earnings span is the study window plus its opening year, not the file",
+      _ee.earnings_span() == list(range(2012, 2026))
+      and min(_ee.real_eps()) == 2012,
+      "source reaches back to 1985; the span binds at 2012")
+
+# THE COLD RUN, REPRODUCED OFFLINE. Oracle, fiscal year ending 31 May, never
+# touched by this project before 2026-08-13. Run live that day through
+# code/run_study.py; the fixtures are committed so it repeats without a network.
+print()
+print("--- the Oracle cold run reproduces offline ---")
+import run_study as _rs                                            # noqa: E402
+
+_orcl_cfg = _rs.StudyConfig(
+    ticker="ORCL", cik="0001341439", fy_end_month=5, splits=[],
+    first_year=2013, last_year=2025, coe_longrun=0.055,
+    prices='orcl_monthly.csv', traded_range='orcl_traded_range.csv',
+    split_year=2020)
+_rs.REF.clear()
+import io as _io                                                   # noqa: E402
+import contextlib as _cl                                           # noqa: E402
+with _cl.redirect_stdout(_io.StringIO()):
+    _ostudy, _oEE = _rs.run(_orcl_cfg, 'orcl_sec_raw.json')
+
+check("Oracle: shares retired come from the filed flow, nothing derived",
+      _ostudy.retired_tag == 'StockRepurchasedAndRetiredDuringPeriodShares'
+      and not _ostudy.derived_years and not _ostudy.unresolved_years)
+check("Oracle: every implied price paid sits inside its own year's traded range",
+      _ostudy.price_failures == [],
+      "checked against intra-month extremes, not period-end closes")
+check("Oracle: read as a CANCELLING company from its own filings",
+      _ostudy.net_cost['basis'] == 'retired',
+      "no treasury element of any name is filed in any year")
+check("Oracle: the excise tax REFUSES - fiscal 2023 straddles 2022-12-31",
+      any('excise tax REFUSED' in t for _k, t in _rs.REF),
+      "42% exposed by month, no filed figure, no estimate opted into")
+check("Oracle: timing dependence above 100%, so the headline is not a verdict",
+      _oEE['timing_dependence'] > 1.0,
+      f"{100*_oEE['timing_dependence']:.0f}% of the headline entry effect")
+check("Oracle: the estimator families disagree on the sign of the price decision",
+      _oEE['families_disagree_on_sign'])
+check("Oracle: the break-even sits within a point of the placeholder rate",
+      abs(_oEE['break_even'] - 0.055) < 0.01,
+      f"break-even {100*_oEE['break_even']:.2f}% against a 5.50% placeholder - "
+      "the sign of the headline is decided by a rate nobody has sourced")
+check("Oracle: the run reports guards rather than a clean sheet",
+      len(_rs.REF) >= 20, f"{len(_rs.REF)} guard messages")
+
 print()
 n_fail = sum(1 for s, *_ in CHECKS if s == "FAIL")
 if n_fail:

@@ -252,29 +252,40 @@ FY_HIGH = {y: max(PX[k] for k in fiscal_months(y) if k in PX) for y in FY}
 
 
 # ---------------------------------------------------- AEG account (section 3)
+# PULLED INTO THE TEMPLATE 2026-08-13 (close-out session). Every formula that
+# used to be written out here - the entity-level abnormal earnings growth
+# recursion, the entry effect on each tranche, the continuing effect, the
+# cost-of-equity break-even and the earnings-timing decomposition - now lives in
+# buyback_study_TEMPLATE.entry_effect(). It was the last measure in this study
+# still written twice, once here for Apple and once in code/full_study_COST.py
+# for Costco, and two definitions of one quantity is the defect this repository
+# keeps meeting. Items 4 and 5 removed the same duplication for the net
+# retirement cost and the excise tax and neither moved a published figure; this
+# one does not either, and verify.py rebuilds the whole account independently
+# so that a change would fail the build rather than pass quietly.
+#
+# The names below are unchanged so that nothing downstream in the document has
+# to know where the arithmetic moved to.
 R_AEG = COE_LONGRUN
-nir = {y: NI[y] * DEFL[y] for y in range(2012, 2026)}
-dr = {y: (DIV[y] + REPURCHASE_CASH.get(y, 0)) * DEFL[y] for y in range(2012, 2026)}
-epsr = {y: EPS[y] * DEFL[y] for y in range(2012, 2026)}
-pxr = {y: PX_PAID[y] * DEFL[y] for y in FY}
-AEG_ENT = {s: nir[s] - (1 + R_AEG) * nir[s - 1] + R_AEG * dr[s - 1] for s in FY}
+_nc_study.fin = {'net_income': NI, 'diluted_eps': EPS, 'dividends': DIV}
+_nc_study.coe = COE
+EE = _nc_study.entry_effect(rho=R_AEG, coe_by_year=COE, split_year=2020)
+
+nir, epsr = _nc_study.real_net_income(), EE['real_eps']
+dr, pxr = _nc_study.real_distributions(), EE['real_price_paid']
+AEG_ENT = EE['aeg_entity']
 AEG_ENT_TOT = sum(AEG_ENT.values())
-ENTRY, CONT = {}, {}
-for t in FY[:-1]:
-    ENTRY[t] = RETIRED[t] * (epsr[t + 1] - R_AEG * pxr[t])
-    CONT[t] = sum(RETIRED[t] * AEG_ENT[s] / SHARES_OUT[s] for s in range(t + 2, 2026))
-ENTRY_TOT, CONT_TOT = sum(ENTRY.values()), sum(CONT.values())
-ENTRY_ALT = sum(RETIRED[t] * (epsr[t + 1] - COE[t] * pxr[t]) for t in FY[:-1])
-NEG_LR = [t for t in FY[:-1] if ENTRY[t] < 0]
-NEG_CH = [t for t in FY[:-1] if RETIRED[t] * (epsr[t + 1] - COE[t] * pxr[t]) < 0]
-_ps = sorted(AEG_ENT[s] / SHARES_OUT[s] for s in FY)
-MEAN_AEG_PS = sum(_ps) / len(_ps)
+ENTRY, CONT = EE['per_year'], EE['continuing']
+ENTRY_TOT, CONT_TOT = EE['total'], EE['continuing_total']
+ENTRY_ALT = EE['alt_total']
+NEG_LR, NEG_CH = EE['negative_years'], EE['alt_negative_years']
+MEAN_AEG_PS = EE['mean_aeg_per_share']
 
 # ------------------------------- the cost-of-equity break-even (added 2026-08-12)
-# The entry effect is LINEAR in the capitalization rate:
-#     ENTRY(rho) = SUM_t retired_t * eps_(t+1) - rho * SUM_t retired_t * price_t
-# so it has exactly one root and that root is the retirement-weighted forward real
-# earnings yield. No search, no tolerance, no iteration - it is an identity.
+# The entry effect is LINEAR in the capitalization rate, so it has exactly one
+# root and that root is the retirement-weighted forward real earnings yield. No
+# search, no tolerance, no iteration - it is an identity, and the template
+# computes it that way.
 #
 # WHY THIS BELONGS IN THE REPORT. Every other sensitivity in this study moves a
 # magnitude. This one moves a SIGN, and it is the sensitivity the reader cannot
@@ -283,53 +294,45 @@ MEAN_AEG_PS = sum(_ps) / len(_ps)
 # return on the equity that remains, and this line says how much of a rise the
 # conclusion can absorb before it inverts. It does NOT model that rise - the
 # engine has no re-levering in its live path - it states the tolerance.
-def _rho_star(years):
-    n = sum(RETIRED[t] * epsr[t + 1] for t in years)
-    d = sum(RETIRED[t] * pxr[t] for t in years)
-    return n / d
-
-
-_ALL = FY[:-1]
+#
+# The split at fiscal 2020 is an editorial judgment about Apple's own record and
+# stays here; the arithmetic on either side of it does not.
+_ALL = EE['tranches']
 _EARLY = [t for t in _ALL if t < 2020]
 _LATE = [t for t in _ALL if t >= 2020]
-RHO_STAR = _rho_star(_ALL)
-RHO_STAR_EARLY = _rho_star(_EARLY)
-RHO_STAR_LATE = _rho_star(_LATE)
-RHO_HEADROOM = RHO_STAR - COE_LONGRUN
+RHO_STAR = EE['break_even_windows']['all']
+RHO_STAR_EARLY = EE['break_even_windows']['early']
+RHO_STAR_LATE = EE['break_even_windows']['late']
+RHO_HEADROOM = EE['headroom']
 
 # ------------------- the earnings-timing decomposition (added 2026-08-13)
-# The entry effect is struck on ONE accounting year of earnings, chosen only because it
-# follows the purchase. On a cyclical company that inverts the measure: at a peak the market
-# applies a low multiple to peak earnings, the earnings yield at the price paid is high, and
-# the entry effect praises the worst-timed repurchase. This block does not correct that and
-# does not drop any tranche. It SPLITS the published entry effect into the part attributable
-# to the price decision and the part attributable to which year happened to follow:
+# entry[t] = decision[t] + timing[t]: the part attributable to the price
+# decision and the part attributable to which accounting year happened to
+# follow. An identity that closes exactly, corrects nothing, drops no tranche
+# and moves no published figure. The timing term contains no rate at all, so
+# the diagnostic is rate-agnostic by construction.
 #
-#     entry[t] = decision[t] + timing[t]
-#
-# an identity that closes exactly. No published figure moves. The timing term contains no
-# rate at all, so the diagnostic is rate-agnostic by construction.
-#
-# The trend level is NOT point-identified. Backward-looking estimators (the valuation
-# engine's own normalizer) and symmetric ones (log-linear, centred) disagree on the SIGN of
-# the decision component, because Apple's fiscal 2021 jump did not revert. The symmetric
-# family is primary for an ex-post study - see docs/METHODOLOGY-ADDENDUM-Earnings-Timing-
-# Decomposition-2026-08-13.md - and both families are published as a band.
+# The trend level is NOT point-identified. Backward-looking estimators (the
+# valuation engine's own normalizer) and symmetric ones (log-linear, centred)
+# disagree on the SIGN of the decision component, because Apple's fiscal 2021
+# jump did not revert. The symmetric family is primary for an ex-post study -
+# see docs/METHODOLOGY-ADDENDUM-Earnings-Timing-Decomposition-2026-08-13.md -
+# and both families are published as a band.
 import timing_decomposition as _td
 
-_TD_EST = _td.build_estimators(epsr, window=range(2013, 2026))
-TD_BAND = _td.decomposition_band(RETIRED, epsr, pxr, R_AEG, FY[:-1], _TD_EST)
+_TD_EST = EE['estimators']
+TD_BAND = EE['band']
 TD_PRIMARY = TD_BAND["loglinear"]
 TD_ALT = TD_BAND["normalizer4"]
 _sym = [TD_BAND[n] for n in _td.SYMMETRIC_ESTIMATORS]
 _bwd = [TD_BAND[n] for n in _td.BACKWARD_ESTIMATORS]
-TD_SYM_LO, TD_SYM_HI = min(d["decision"] for d in _sym), max(d["decision"] for d in _sym)
-TD_BWD_LO, TD_BWD_HI = min(d["decision"] for d in _bwd), max(d["decision"] for d in _bwd)
-TD_SYM_BE_LO, TD_SYM_BE_HI = min(d["break_even"] for d in _sym), max(d["break_even"] for d in _sym)
-TD_BWD_BE_LO, TD_BWD_BE_HI = min(d["break_even"] for d in _bwd), max(d["break_even"] for d in _bwd)
-TD_DEP_PRIMARY = _td.timing_dependence(TD_PRIMARY["entry"], TD_PRIMARY["timing"])
+TD_SYM_LO, TD_SYM_HI = EE['symmetric_decision']
+TD_BWD_LO, TD_BWD_HI = EE['backward_decision']
+TD_SYM_BE_LO, TD_SYM_BE_HI = EE['symmetric_break_even']
+TD_BWD_BE_LO, TD_BWD_BE_HI = EE['backward_break_even']
+TD_DEP_PRIMARY = EE['timing_dependence']
 TD_DEP_ALT = _td.timing_dependence(TD_ALT["entry"], TD_ALT["timing"])
-TD_GROWTH = _TD_EST["loglinear"].growth
+TD_GROWTH = EE['trend_growth']
 
 _LBL = {"loglinear": "Log-linear fit, whole window", "centered3": "Centred geometric mean, &plusmn;3yr",
         "centered2": "Centred geometric mean, &plusmn;2yr", "normalizer4": "Engine normalizer, 4-year window",
