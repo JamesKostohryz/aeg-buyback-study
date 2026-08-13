@@ -29,6 +29,7 @@ not an independent source.
 | The round trip | `docs/METHODOLOGY-ADDENDUM-Round-Trip-2026-08-13.md` (item 3) |
 | Treasury permanence | `docs/METHODOLOGY-ADDENDUM-Treasury-Permanence-2026-08-13.md` (item 4) |
 | Findings and handoffs | `docs/*FINDINGS*`, `docs/*HANDOFF*` |
+| Next session prompt | `docs/00-NEXT-SESSION-PROMPT-Buyback-Study-2026-08-13.md` — most recent wins |
 
 ## If you are starting a new session on this project
 
