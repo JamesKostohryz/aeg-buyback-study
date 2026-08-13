@@ -37,3 +37,15 @@ jobs:
             exit 1
           fi
           echo "template_test_HD.py: all eleven defect checks confirmed passing."
+
+      - name: Prove the round trip on American Airlines (addendum item 3)
+        working-directory: code
+        run: |
+          set -o pipefail
+          python3 roundtrip_test_AAL.py | tee /tmp/rt_output.txt
+          if ! grep -q '^ALL ROUND-TRIP CHECKS PASS$' /tmp/rt_output.txt; then
+            echo ""
+            echo "::error::roundtrip_test_AAL.py did not report ALL ROUND-TRIP CHECKS PASS. Failing the build."
+            exit 1
+          fi
+          echo "roundtrip_test_AAL.py: all round-trip checks confirmed passing."

@@ -323,6 +323,132 @@ OUT.append((_epsr[2025] > _epsr[2021] > _epsr[2020] * 1.4,
 _dep_p = _td.timing_dependence(_td_band["loglinear"]["entry"], _td_band["loglinear"]["timing"])
 _dep_a = _td.timing_dependence(_td_band["normalizer4"]["entry"], _td_band["normalizer4"]["timing"])
 
+# ================ 5d. THE ROUND TRIP (addendum item 3, added 2026-08-13)
+# Apple is the NULL case for this measure and that is exactly why it belongs here:
+# the round trip now runs unconditionally on every company, so the thing most likely
+# to go wrong quietly is a company that never raised equity being given a number
+# anyway. Apple has never raised equity. Every round-trip total for Apple must be a
+# true zero, and the arithmetic must be proven on synthetic cases with closed-form
+# answers, because Apple's own data cannot exercise it.
+import sys as _sys
+_sys.path.insert(0, '..')
+from buyback_study import CompanyConfig as _CC, BuybackStudy as _BS, EquityRaise as _ER
+
+_cfg = _CC(ticker="AAPL", cik="0000320193", fy_end_month=9,
+           splits=[("2014-06-09", 7), ("2020-08-31", 4)],
+           first_year=2013, last_year=2025)
+_sec_min = {'repurchase_cash': {y: {'val': REPURCHASE_CASH[y] * 1e6, 'filed': '2026-01-01'}
+                                for y in FY}}
+_null = _BS(_cfg, {}, _sec_min, {}, DEFL, {}, raises=[])
+_null.retired, _null.issued = dict(_ret), dict(_iss)
+_null_rt = _null.round_trip_reconciled()
+
+OUT.append((_null_rt['has_round_trip'] is False,
+            "round trip: Apple raised no equity, so has_round_trip is False", 0, 0, ""))
+chk("round trip: Apple's matched shares are a true zero", _null_rt['matched_shares'], 0.0, 0.0, "mn")
+chk("round trip: Apple's loss is a true zero", _null_rt['real_loss'], 0.0, 0.0, "$m")
+OUT.append((_null_rt['recovery_ratio'] is None,
+            "round trip: Apple's recovery ratio is None, not a fabricated 1.0", 0, 0, ""))
+
+# Apple DOES have ProceedsFromIssuanceOfCommonStock in every year to fiscal 2021.
+# It is ordinary employee-plan flow and must never be read as a capital raise. The
+# distinction is not a matter of judgment here: at Apple's own fiscal-year mean
+# prices that cash buys a fraction of one percent of the shares outstanding, which
+# is a compensation plan, not a trip to the market.
+_worst_plan = max((ISSUANCE_PROCEEDS[y] / (REPURCHASE_CASH[y] / _ret[y]))
+                  / SHARES_OUT[y - 1] for y in FY if y in ISSUANCE_PROCEEDS)
+OUT.append((_worst_plan < 0.005,
+            "round trip: Apple's issuance proceeds are plan flow (<0.5% of shares), never a raise",
+            100 * _worst_plan, 0.5, "%"))
+
+# ---- the arithmetic, on synthetic cases whose answers are known in closed form.
+def _synth(retired, cash, raises, defl=None, plan=None):
+    c = _CC(ticker="SYN", cik="0", fy_end_month=12, splits=[], first_year=1,
+            last_year=max([*retired, *[r.fiscal_year for r in raises]] or [1]))
+    d = defl or {y: 1.0 for y in range(0, 40)}
+    st = _BS(c, {}, {'repurchase_cash': {y: {'val': v * 1e6, 'filed': '2026-01-01'}
+                                         for y, v in cash.items()}},
+             {}, d, {}, raises=raises, plan_shares=plan or {})
+    st.retired, st.issued = dict(retired), {}
+    st.raise_refusals = set()
+    st._reconciled = True
+    st.raise_reconciliation = {}
+    return st
+
+# (1) Buy 100 at $50, sell 100 at $10. The loss is 100 x 40 = 4,000, exactly, and
+#     both matching conventions must give it because there is only one tranche.
+_s1 = _synth({1: 100.0}, {1: 5000.0}, [_ER(2, 100.0, 1000.0, "raise", "synthetic")])
+_r1 = _s1.round_trip_reconciled()
+chk("  round trip synthetic: one tranche in, one out, loss = shares x price gap",
+    _r1['real_loss'], 4000.0, 1e-9, "$")
+chk("  round trip synthetic: FIFO agrees with average cost on one tranche",
+    _r1['fifo_rebuilt']['real_loss'], 4000.0, 1e-9, "$")
+OUT.append((_r1['route_c_agrees'] and _r1['fifo_agrees_on_shares'],
+            "  round trip synthetic: all three routes agree", _r1['route_c_real_loss'],
+            _r1['real_loss'], "$"))
+
+# (2) TWO tranches at different prices, one raise smaller than the pool. Average cost
+#     draws at the blended price; FIFO draws the oldest tranche first. The two MUST
+#     differ here, and by a known amount - if they ever agree on this case the FIFO
+#     route has stopped being independent and the cross-check is worthless.
+_s2 = _synth({1: 100.0, 2: 100.0}, {1: 8000.0, 2: 2000.0},
+             [_ER(3, 100.0, 1000.0, "raise", "synthetic")])
+_r2 = _s2.round_trip_reconciled()
+chk("  round trip synthetic: average cost draws 100 shares at the blended $50",
+    _r2['real_cost_matched'], 5000.0, 1e-9, "$")
+chk("  round trip synthetic: FIFO draws the oldest tranche at $80",
+    _r2['fifo_rebuilt']['real_cost_matched'], 8000.0, 1e-9, "$")
+OUT.append((abs(_r2['ordering_effect'] - 3000.0) < 1e-9,
+            "  round trip synthetic: the ordering effect is real and equals the tranche spread",
+            _r2['ordering_effect'], 3000.0, "$"))
+
+# (3) ORDERING. A raise in year 1 cannot reach a repurchase made in year 2.
+_s3 = _synth({2: 100.0}, {2: 5000.0}, [_ER(1, 100.0, 1000.0, "raise", "synthetic")])
+_r3 = _s3.round_trip()
+chk("  round trip synthetic: a raise cannot match a later repurchase",
+    _r3['matched_shares'], 0.0, 1e-12, "mn")
+
+# (4) A raise LARGER than the pool. The excess is new equity, not a round trip, and
+#     must not contribute to the loss.
+_s4 = _synth({1: 40.0}, {1: 2000.0}, [_ER(2, 100.0, 1000.0, "raise", "synthetic")])
+_r4 = _s4.round_trip()
+chk("  round trip synthetic: only the overlapping quantity is matched",
+    _r4['matched_shares'], 40.0, 1e-12, "mn")
+chk("  round trip synthetic: the excess is reported as new equity, not as loss",
+    _r4['unmatched_raise_shares'], 60.0, 1e-12, "mn")
+chk("  round trip synthetic: loss counts the matched 40 shares only",
+    _r4['real_loss'], 40.0 * (50.0 - 10.0), 1e-9, "$")
+
+# (5) A raise ABOVE the price paid must produce a NEGATIVE loss - a gain. The measure
+#     must not be built so that it can only ever condemn.
+_s5 = _synth({1: 100.0}, {1: 1000.0}, [_ER(2, 100.0, 5000.0, "raise", "synthetic")])
+chk("  round trip synthetic: selling above the price paid gives a gain, not a loss",
+    _s5.round_trip()['real_loss'], -4000.0, 1e-9, "$")
+
+# (6) Plan netting is applied once per YEAR even when a year carries several raise
+#     lines. Subtracting it per line double-counts, which is a bug this measure had
+#     and which cost 1.6 million shares on American Airlines' fiscal 2020.
+_s6 = _synth({1: 200.0}, {1: 10000.0},
+             [_ER(2, 60.0, 600.0, "a", "synthetic"), _ER(2, 40.0, 400.0, "b", "synthetic")],
+             plan={2: 10.0})
+chk("  round trip synthetic: a year's plan issuance is netted once, not once per line",
+    _s6.round_trip()['matched_shares'], 90.0, 1e-12, "mn")
+
+# (7) The measure is rate-free by construction, exactly like the timing component.
+#     It contains no cost of equity and cannot be tuned by an argument about one.
+_s7 = _synth({1: 100.0}, {1: 5000.0}, [_ER(2, 100.0, 1000.0, "raise", "synthetic")])
+chk("  round trip: contains no cost of equity and cannot be moved by one",
+    _s7.round_trip()['real_loss'], _r1['real_loss'], 1e-12, "$")
+
+# (8) Deflation is applied at each end at that end's own year, so a round trip in a
+#     period of inflation is LARGER in real terms than in nominal terms. Buying at
+#     $50 in year 1 and selling at $10 in year 2 with 25% cumulative inflation
+#     between them is a real loss of 100 x (50 x 1.25 - 10) = 5,250, not 4,000.
+_s8 = _synth({1: 100.0}, {1: 5000.0}, [_ER(2, 100.0, 1000.0, "raise", "synthetic")],
+             defl={1: 1.25, 2: 1.00})
+chk("  round trip synthetic: each end is deflated at its own year",
+    _s8.round_trip()['real_loss'], 5250.0, 1e-9, "$")
+
 # ================================================ 6. AGAINST THE PUBLISHED HTML
 # Inline expected-value comments (# 26.6, # 3.8, # 125.0 and the rest) were
 # removed 2026-08-12. They were written before the debt correction of

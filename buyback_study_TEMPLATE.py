@@ -86,7 +86,63 @@ TAGS = {
     # in as 'treasury_shares_balance'.
     'shares_issued': 'CommonStockSharesIssued',
     'treasury_shares_balance': 'TreasuryStockShares',
+    # 2026-08-13, the round trip (addendum item 3). The financing-activities
+    # equity line, under whichever of these names the company uses. It is the
+    # RECONCILIATION target for the round trip, NOT its numerator - see
+    # EquityRaise below for why that distinction is the whole guard.
+    'equity_raise_cash_flow': 'ProceedsFromIssuanceOrSaleOfEquity',
+    'equity_raise_cash_flow_alt': 'ProceedsFromIssuanceOfCommonStock',
+    'equity_raise_cash_flow_warrants': 'ProceedsFromIssuanceOfCommonStockAndWarrants',
+    # Ordinary employee-plan share issuance, netted out of the round trip so a
+    # routine compensation flow cannot masquerade as a distress raise.
+    'plan_shares_issued': 'StockIssuedDuringPeriodSharesShareBasedCompensation',
 }
+
+ROUND_TRIP_RAISE_TAGS = ('ProceedsFromIssuanceOrSaleOfEquity',
+                         'ProceedsFromIssuanceOfCommonStock',
+                         'ProceedsFromIssuanceOfCommonStockAndWarrants')
+
+
+@dataclass
+class EquityRaise:
+    """One share-issuing equity raise, taken from the statement of stockholders'
+    equity, where the share count and the dollar amount sit on the SAME LINE.
+
+    WHY THIS IS NOT READ FROM A TAG, AND THE FINDING THAT FORCED IT
+    (2026-08-13, American Airlines). The obvious construction is to divide the
+    financing-activities equity line by the change in shares outstanding. On
+    American Airlines' fiscal 2020 that gives $15.00 a share. The true figure,
+    from the company's own equity statement, is $12.91: the $2,970m financing
+    line contains $415m that is the EQUITY COMPONENT OF A CONVERTIBLE BOND,
+    bifurcated out of debt proceeds under the then-current standard. No share
+    was issued for it.
+
+    The contaminated price is sixteen percent too high, it is wrong in the
+    direction that FLATTERS the repurchase program, and - this is the part that
+    matters - $15.00 sits comfortably inside the stock's 2020 traded range of
+    $8.25 to $30.78, so validate_prices() passes it without a murmur. The price
+    validator cannot see a contaminated numerator whose error is small relative
+    to the traded range. Nothing else in this template could have caught it.
+
+    So the round trip is struck on the equity statement, where shares and
+    dollars are disclosed together and cannot drift apart, and the
+    financing-activities line is used only to RECONCILE. Where the two
+    disagree by more than the tolerance, the difference must be named in
+    `reconciling_items` or the year is refused outright.
+
+    shares    millions, as disclosed on that line
+    proceeds  $ millions, as disclosed on that line (net of offering costs)
+    source    provenance: the filing and the statement line it came from
+    """
+    fiscal_year: int
+    shares: float
+    proceeds: float
+    label: str
+    source: str
+
+    @property
+    def price(self):
+        return self.proceeds / self.shares
 
 
 @dataclass
@@ -288,6 +344,22 @@ class BuybackStudy:
     coe: dict          # {fiscal_year: real cost of equity, decimal}
     engine: dict = field(default_factory=dict)   # neutral_value_ps, price_real
     notes: list = field(default_factory=list)
+    # ------------------------------------------------ the round trip (2026-08-13)
+    raises: list = field(default_factory=list)
+    # [EquityRaise], from the statement of stockholders' equity. Empty means
+    # "this company raised no equity in the window", which is a FACT about the
+    # company and is reported as such - it is not a missing input.
+    plan_shares: dict = field(default_factory=dict)
+    # {fy: millions} ordinary employee-plan share issuance, netted out so a
+    # routine compensation flow cannot be read as a distress raise.
+    raise_reconciling_items: dict = field(default_factory=dict)
+    # {fy: {name: $m}} named differences between the equity statement and the
+    # financing-activities line. Anything unnamed refuses the year.
+    withholding_in_repurchase_cash: dict = field(default_factory=dict)
+    # {fy: $m} where the company presents share repurchases and shares withheld
+    # for employee taxes on ONE cash-flow line (American Airlines does), the
+    # withholding portion is not a repurchase and is removed from the price
+    # paid. Absent means the two are presented separately.
 
     # ---------------------------------------------------------------- setup
     def years(self):
@@ -343,7 +415,8 @@ class BuybackStudy:
 
     # ------------------------------------------------- shares retired/issued
     def share_flows(self, issue_rate_fallback=None, issue_scale=1.0,
-                     early_years_for_fallback=3):
+                     early_years_for_fallback=3, max_plausible_issue_rate=0.05,
+                     require_cash_for_derived=True):
         """Shares retired and net shares issued, both in millions.
 
         Where the company tagged shares retired, it is used directly and net
@@ -441,14 +514,54 @@ class BuybackStudy:
                 n = min(early_years_for_fallback, len(obs))
                 early_years = sorted(obs)[:n]
                 issue_rate_fallback = sum(obs[y] for y in early_years) / n
-                self.notes.append(
-                    f"net issuance observable in {len(obs)} year(s); years "
-                    "without a filed retirement count are held at the rate "
-                    f"observed in the earliest {n} observable year(s) "
-                    f"({', '.join('FY%d' % y for y in early_years)}), "
-                    f"{100*issue_rate_fallback:.3f}% of opening shares - "
-                    "NOT the mean of the whole observed window, which would "
-                    "extrapolate a later trend backward")
+                # ------------------------------------------------ defect 11
+                # 2026-08-13, found on American Airlines while building the
+                # round trip. Defect 5's fix estimates the issuance rate from
+                # the EARLIEST observable years, which is right when the only
+                # thing moving the share count is employee plan activity, and
+                # badly wrong when an early year contains a STRUCTURAL share
+                # issuance - a merger, an emergence from bankruptcy, a large
+                # stock-funded acquisition. American Airlines' fiscal 2014
+                # prints an "issuance rate" of 36.8 percent of opening shares,
+                # because that is the year the US Airways merger shares and
+                # the bankruptcy claim distributions landed. Averaged into the
+                # fallback it gave 13 percent, which then manufactured 54.6
+                # and 81.3 million shares of retirement in fiscal 2021 and
+                # 2022 - years in which the company repurchased nothing and
+                # was in fact contractually barred from doing so.
+                #
+                # No ordinary employee plan issues five percent of the company
+                # in a year. A rate above `max_plausible_issue_rate` is not an
+                # employee plan and is refused rather than used; the affected
+                # years fall through to the unresolved handling below, where a
+                # share count and a price are not invented for them. Raise the
+                # bound explicitly for a company where a higher rate is
+                # genuinely ordinary, and say so in the report.
+                if (max_plausible_issue_rate is not None
+                        and issue_rate_fallback > max_plausible_issue_rate):
+                    self.notes.append(
+                        "ISSUANCE-RATE FALLBACK REFUSED: the rate estimated "
+                        f"from the earliest {n} observable year(s) "
+                        f"({', '.join('FY%d' % y for y in early_years)}) is "
+                        f"{100*issue_rate_fallback:.2f}% of opening shares, "
+                        f"above the {100*max_plausible_issue_rate:.0f}% bound "
+                        "for an ordinary employee plan. A rate that size is a "
+                        "structural issuance - a merger, an emergence from "
+                        "bankruptcy, a stock-funded acquisition - not "
+                        "compensation, and extrapolating it would manufacture "
+                        "retirements in years the company retired nothing. "
+                        "Years without a filed retirement count are left "
+                        "unresolved instead.")
+                    issue_rate_fallback = None
+                else:
+                    self.notes.append(
+                        f"net issuance observable in {len(obs)} year(s); years "
+                        "without a filed retirement count are held at the rate "
+                        f"observed in the earliest {n} observable year(s) "
+                        f"({', '.join('FY%d' % y for y in early_years)}), "
+                        f"{100*issue_rate_fallback:.3f}% of opening shares - "
+                        "NOT the mean of the whole observed window, which would "
+                        "extrapolate a later trend backward")
             else:
                 # ------------------------------------------------- defect 4
                 # No year anywhere in the window has both a filed retirement
@@ -461,18 +574,56 @@ class BuybackStudy:
                 # decline to report those years rather than fabricate them.
                 issue_rate_fallback = None
 
-        retired, issued, derived, unresolved = {}, {}, set(), set()
+        # ------------------------------------------------------- defect 10
+        # 2026-08-13, found on American Airlines. A year in which the company
+        # spent nothing repurchasing stock cannot have had a retirement, and
+        # deriving one from a share-count movement is how a share issuance gets
+        # reported as a buyback. Two of American Airlines' years look like
+        # repurchase years on the cash line alone and are not: fiscal 2021 and
+        # 2022 tag $18m and $21m of PaymentsForRepurchaseOfCommonStock, and
+        # every dollar of it is employee tax withholding presented on the same
+        # line. The company repurchased nothing in either year - under the
+        # payroll support agreements it was barred from doing so - and a
+        # template that read that line as a repurchase would have published
+        # American Airlines buying back its own stock in years it was
+        # contractually prohibited from buying back its own stock.
+        def _repurchase_cash(y):
+            v = self.sec.get('repurchase_cash', {}).get(y, {}).get('val')
+            if v is None:
+                return None
+            return v / 1e6 - self.withholding_in_repurchase_cash.get(y, 0.0)
+
+        retired, issued, derived, unresolved, no_cash = {}, {}, set(), set(), set()
         for y in self.years():
             if y not in S or (y - 1) not in S:
                 continue
             if y in filed:
                 retired[y], issued[y] = filed[y], S[y] - S[y - 1] + filed[y]
-            elif issue_rate_fallback is not None:
+                continue
+            c = _repurchase_cash(y)
+            if require_cash_for_derived and not (c and c > 0):
+                # No filed retirement and no repurchase cash. The company did
+                # not repurchase. This is settled before the fallback is even
+                # consulted, because no estimate of an issuance rate can turn a
+                # year with no repurchase into a year with one.
+                no_cash.add(y)
+                continue
+            if issue_rate_fallback is not None:
                 issued[y] = S[y - 1] * issue_rate_fallback * issue_scale
                 retired[y] = S[y - 1] - S[y] + issued[y]
                 derived.add(y)
             else:
                 unresolved.add(y)
+
+        self.no_repurchase_years = no_cash
+        if no_cash:
+            self.notes.append(
+                "no repurchase in " + ", ".join(f"FY{y}" for y in sorted(no_cash)) +
+                " - no filed retirement count and no repurchase cash net of any "
+                "employee withholding presented on the same line. These years "
+                "are recorded as years the company did not repurchase, which is "
+                "a fact, rather than having a retirement derived for them from a "
+                "share-count movement.")
 
         self.derived_years = derived
         self.unresolved_years = unresolved
@@ -634,6 +785,398 @@ class BuybackStudy:
                 'combined': dw / mk - 1,
                 'pe_paid': pe_paid, 'pe_market': pe_mkt}
 
+    # --------------------------------------------------------- round trip
+    # ADDENDUM ITEM 3, built 2026-08-13. Buy heavily near a peak, then issue
+    # equity near a trough. It is the case that animates the entire public
+    # argument against repurchases, and until now this template could not see
+    # it, because Apple - the company it was generalized from - has never
+    # raised equity, so nothing was built.
+    #
+    # WHAT IS AND IS NOT CLAIMED. Shares are fungible; no particular share
+    # repurchased in 2016 is the share sold in 2020, and this measure does not
+    # pretend otherwise. What it computes is an inventory question with an
+    # exact answer: over this window the company took a quantity of its own
+    # equity off the market at one set of prices and put a quantity back on at
+    # another, and the difference in real cash on the overlapping quantity is a
+    # fact about the program. Ordering is respected - only repurchases that
+    # PRECEDE a raise can be matched to it - and the matching convention is
+    # average cost, which is the one convention that does not require choosing
+    # an arbitrary order within the pool. FIFO is computed alongside it as an
+    # independent route and the two are required to agree.
+    #
+    # This is ex-post disclosure. It moves no valuation number, it is not an
+    # expense, it does not enter the abnormal earnings growth account, and it
+    # states no view about Intrinsic Value.
+
+    def real_repurchase_price(self, y):
+        """Real price paid per share retired in fiscal year y, in base-year
+        dollars, or None where the year is unresolved.
+
+        Removes any employee tax withholding folded into the same cash-flow
+        line. That withholding is not a repurchase; leaving it in overstates
+        the price paid, and on the year it matters most it is a large share of
+        a small line (American Airlines fiscal 2020: $15m of $173m, nine
+        percent of the line).
+        """
+        q = self.retired.get(y)
+        if not q:
+            return None
+        cash = self.sec.get('repurchase_cash', {}).get(y, {}).get('val')
+        if cash is None:
+            return None
+        cash = cash / 1e6 - self.withholding_in_repurchase_cash.get(y, 0.0)
+        return (cash / q) * self.deflator[y]
+
+    def reconcile_raises(self, tolerance=0.005, _quiet=False):
+        """The equity statement against the financing-activities line.
+
+        This is the guard the price validator cannot be. It compares the sum of
+        the disclosed issuance lines for a year against the cash-flow equity
+        line for the same year, and requires any difference beyond `tolerance`
+        of the line to be NAMED in `raise_reconciling_items`. An unnamed
+        difference refuses that year's raise rather than absorbing it into the
+        price. Returns {fy: dict} and appends a note per year that does not
+        reconcile cleanly.
+        """
+        if getattr(self, '_reconciled', False):
+            return self.raise_reconciliation
+        self._reconciled = True
+        cf = {}
+        for key in ('equity_raise_cash_flow', 'equity_raise_cash_flow_alt',
+                    'equity_raise_cash_flow_warrants'):
+            for y, e in self.sec.get(key, {}).items():
+                cf.setdefault(y, {})[key] = e['val'] / 1e6
+
+        out, refused = {}, set()
+        by_year = {}
+        for r in self.raises:
+            by_year.setdefault(r.fiscal_year, []).append(r)
+
+        for y, rs in sorted(by_year.items()):
+            stmt = sum(r.proceeds for r in rs)
+            line = max(cf.get(y, {}).values()) if cf.get(y) else None
+            named = self.raise_reconciling_items.get(y, {})
+            named_total = sum(named.values())
+            if line is None:
+                out[y] = {'statement': stmt, 'cash_flow_line': None,
+                          'gap': None, 'named': named, 'clean': None}
+                self.notes.append(
+                    f"FY{y} equity raise: no financing-activities equity line "
+                    "tagged, so the equity-statement figure could not be "
+                    "cross-checked against the cash flow statement. The raise "
+                    "is used as disclosed and this is stated rather than "
+                    "assumed away.")
+                continue
+            gap = line - stmt
+            resid = gap - named_total
+            clean = abs(resid) <= tolerance * abs(line)
+            out[y] = {'statement': stmt, 'cash_flow_line': line, 'gap': gap,
+                      'named': named, 'residual': resid, 'clean': clean}
+            if named:
+                self.notes.append(
+                    f"FY{y} equity raise reconciles: equity statement "
+                    f"${stmt:,.0f}m against a financing-activities line of "
+                    f"${line:,.0f}m, a gap of ${gap:,.0f}m accounted for by " +
+                    ", ".join(f"{k} ${v:,.0f}m" for k, v in named.items()) +
+                    ". The cash-flow line is NOT the numerator; the equity "
+                    "statement is.")
+            if not clean:
+                refused.add(y)
+                self.notes.append(
+                    f"FY{y} EQUITY RAISE REFUSED: the financing-activities "
+                    f"line (${line:,.0f}m) and the equity statement "
+                    f"(${stmt:,.0f}m) differ by ${gap:,.0f}m, of which "
+                    f"${resid:,.0f}m is unexplained. An unexplained difference "
+                    "is not netted, averaged or absorbed into the issue price "
+                    "- the year is left out of the round trip and said so.")
+        self.raise_refusals = refused
+        self.raise_reconciliation = out
+        return out
+
+    def resolved_raises(self):
+        """Raises that survived reconciliation, with ordinary employee-plan
+        share issuance netted out of the share count.
+
+        Netting matters because the plan flow is continuous and small while a
+        distress raise is lumpy and large; without netting, every year of
+        routine option and restricted-stock settlement would enter the measure
+        as if the company had gone to the market for capital.
+        """
+        if not hasattr(self, 'raise_refusals'):
+            self.reconcile_raises()
+        out = []
+        for r in sorted(self.raises, key=lambda r: r.fiscal_year):
+            if r.fiscal_year in self.raise_refusals:
+                continue
+            out.append(r)
+        plan_total = sum(self.plan_shares.get(y, 0.0)
+                         for y in {r.fiscal_year for r in out})
+        if plan_total and out and not getattr(self, '_noted_plan_netting', False):
+            self._noted_plan_netting = True
+            self.notes.append(
+                f"round trip: {plan_total:,.1f}mn shares of ordinary "
+                "employee-plan issuance in the raise years are excluded from "
+                "the issued side, so a routine compensation flow cannot be "
+                "read as a distress raise. Plan issuance is measured on its "
+                "own tagged share count, not inferred from a residual.")
+        return out
+
+    def _plan_netted_shares(self, raises):
+        """Net each year's ordinary employee-plan issuance out of that year's
+        raises exactly once.
+
+        Subtracting the year's plan figure from EVERY raise line in that year
+        double-counts it. American Airlines' fiscal 2020 has two lines - the
+        underwritten offerings and the at-the-market programme - so the naive
+        version removed 1.6 million shares of plan issuance twice and
+        understated the round trip by that much. Returns {id(raise): net
+        shares}, drawing the year's plan flow down across its raises in order.
+        """
+        remaining = {}
+        for r in raises:
+            remaining.setdefault(r.fiscal_year,
+                                 self.plan_shares.get(r.fiscal_year, 0.0))
+        out = {}
+        for r in sorted(raises, key=lambda r: (r.fiscal_year, -r.shares)):
+            take = min(remaining[r.fiscal_year], r.shares)
+            remaining[r.fiscal_year] -= take
+            out[id(r)] = r.shares - take
+        return out
+
+    def round_trip(self, match='average_cost'):
+        """Repurchase cash per year against equity raised per year, at the
+        prices at each end, and the cumulative round-trip loss where both
+        occurred inside the window.
+
+        Everything is in base-year (real) dollars. `match` is 'average_cost'
+        (primary) or 'fifo' (the independent cross-check); the two are required
+        to agree on matched shares exactly and on the loss to within a stated
+        tolerance, and round_trip_reconciled() below performs that test.
+
+        Returns a dict. `has_round_trip` False means the company issued no
+        equity inside the window - a fact about the company, reported as such,
+        with every total at a true zero rather than a missing value.
+        """
+        raises = self.resolved_raises()
+        buy_years = [y for y in self.years()
+                     if self.retired.get(y) and self.real_repurchase_price(y)]
+
+        rows, pool, fifo_pool = [], [], []
+        cost_matched = proceeds_matched = shares_matched = 0.0
+        unmatched_raise_shares = unmatched_raise_proceeds = 0.0
+        fifo_cost_matched = 0.0
+
+        raises_by_year = {}
+        for r in raises:
+            raises_by_year.setdefault(r.fiscal_year, []).append(r)
+        net_shares = self._plan_netted_shares(raises)
+
+        for y in self.years():
+            if y in buy_years:
+                q, px = self.retired[y], self.real_repurchase_price(y)
+                pool.append([q, px])
+                fifo_pool.append([q, px])
+            for r in raises_by_year.get(y, []):
+                q_raise = net_shares[id(r)]
+                px_sell = r.price * self.deflator[y]
+                if q_raise <= 0:
+                    self.notes.append(
+                        f"FY{y} raise '{r.label}': net of employee-plan "
+                        "issuance the share count is not positive, so it is "
+                        "not treated as a raise.")
+                    continue
+                avail = sum(t[0] for t in pool)
+                take = min(avail, q_raise)
+                # ---- average cost (primary)
+                cost = 0.0
+                if take > 0:
+                    avg = sum(t[0] * t[1] for t in pool) / avail
+                    cost = take * avg
+                    left = take
+                    for t in pool:
+                        d = min(t[0], left)
+                        t[0] -= d
+                        left -= d
+                        if left <= 1e-12:
+                            break
+                    pool[:] = [t for t in pool if t[0] > 1e-12]
+                # ---- FIFO (independent route)
+                fifo_cost, left = 0.0, take
+                for t in fifo_pool:
+                    d = min(t[0], left)
+                    fifo_cost += d * t[1]
+                    t[0] -= d
+                    left -= d
+                    if left <= 1e-12:
+                        break
+                fifo_pool[:] = [t for t in fifo_pool if t[0] > 1e-12]
+
+                proceeds = take * px_sell
+                rows.append({
+                    'fiscal_year': y, 'label': r.label,
+                    'raise_shares_gross': r.shares,
+                    'plan_shares_netted': r.shares - q_raise,
+                    'raise_shares_net': q_raise,
+                    'matched_shares': take,
+                    'unmatched_shares': q_raise - take,
+                    'real_price_received': px_sell,
+                    'nominal_price_received': r.price,
+                    'real_avg_price_paid': (cost / take) if take else None,
+                    'real_cost_matched': cost,
+                    'real_proceeds_matched': proceeds,
+                    'real_loss': cost - proceeds,
+                    'fifo_real_cost_matched': fifo_cost,
+                    'source': r.source,
+                })
+                shares_matched += take
+                cost_matched += cost
+                fifo_cost_matched += fifo_cost
+                proceeds_matched += proceeds
+                unmatched_raise_shares += q_raise - take
+                unmatched_raise_proceeds += (q_raise - take) * px_sell
+
+        total_buy_cost = sum(self.retired[y] * self.real_repurchase_price(y)
+                             for y in buy_years)
+        total_buy_shares = sum(self.retired[y] for y in buy_years)
+        loss = cost_matched - proceeds_matched
+        return {
+            'has_round_trip': bool(rows),
+            'episodes': rows,
+            'matched_shares': shares_matched,
+            'real_cost_matched': cost_matched,
+            'real_proceeds_matched': proceeds_matched,
+            'real_loss': loss,
+            'fifo_real_cost_matched': fifo_cost_matched,
+            'fifo_real_loss': fifo_cost_matched - proceeds_matched,
+            'recovery_ratio': (proceeds_matched / cost_matched)
+                              if cost_matched else None,
+            'real_avg_price_paid_matched': (cost_matched / shares_matched)
+                                           if shares_matched else None,
+            'real_avg_price_received': (proceeds_matched / shares_matched)
+                                       if shares_matched else None,
+            'unmatched_raise_shares': unmatched_raise_shares,
+            'unmatched_raise_proceeds': unmatched_raise_proceeds,
+            'total_real_repurchase_cost': total_buy_cost,
+            'total_shares_retired': total_buy_shares,
+            'share_of_program_round_tripped':
+                (shares_matched / total_buy_shares) if total_buy_shares else 0.0,
+            'loss_share_of_program':
+                (loss / total_buy_cost) if total_buy_cost else 0.0,
+        }
+
+    def round_trip_reconciled(self, share_tol=1e-9, loss_tol=1e-6):
+        """The round trip computed two independent ways, as the house
+        convention requires before a sentence is written about what it means.
+
+        Route A, average cost, draws every match from a single pooled average.
+        Route B, FIFO, matches tranche by tranche in the order the shares were
+        bought. They are genuinely different arithmetic on genuinely different
+        intermediate quantities, and they must agree on the matched share count
+        exactly. Where they disagree on the loss, the difference is the
+        ordering effect and is reported rather than suppressed - it is real
+        information about how concentrated the round trip is in a few tranches.
+        """
+        rt = self.round_trip()
+
+        # Route B, rebuilt from the inputs by a separate function rather than
+        # read off the same loop, so the agreement below is a test and not a
+        # tautology. round_trip() also carries a FIFO figure computed inline;
+        # that one shares the loop's matched quantity by construction and is
+        # therefore NOT independent evidence. This one is.
+        fifo = self._fifo_round_trip()
+        rt['fifo_rebuilt'] = fifo
+        rt['fifo_agrees_on_shares'] = (
+            abs(fifo['matched_shares'] - rt['matched_shares']) <= share_tol)
+        rt['fifo_agrees_on_proceeds'] = (
+            abs(fifo['real_proceeds_matched'] - rt['real_proceeds_matched'])
+            <= max(loss_tol, 1e-9 * abs(rt['real_proceeds_matched'])))
+        rt['fifo_inline_agrees'] = (
+            abs(fifo['real_cost_matched'] - rt['fifo_real_cost_matched'])
+            <= max(loss_tol, 1e-9 * abs(rt['fifo_real_cost_matched'] or 1.0)))
+
+        # Route C, independent of both matching conventions: the loss must also
+        # equal the sum over episodes of matched shares times the difference
+        # between the two prices. This is the definition restated, and it
+        # closes only if the pool drawdown and the cost accumulation agree.
+        route_c = sum(r['matched_shares'] *
+                      ((r['real_avg_price_paid'] or 0.0) - r['real_price_received'])
+                      for r in rt['episodes'])
+        rt['route_c_real_loss'] = route_c
+        rt['route_c_agrees'] = abs(route_c - rt['real_loss']) <= max(
+            loss_tol, 1e-9 * abs(rt['real_loss']))
+
+        # The ordering effect is the gap between average cost and FIFO. It is
+        # not an error and is not suppressed: it says how much of the answer
+        # depends on which repurchase tranche one calls the one that was sold
+        # back, which is not a knowable fact. A large ordering effect is a
+        # reason to publish the band, exactly as the study already does for the
+        # cost of equity and the earnings-timing trend.
+        rt['ordering_effect'] = fifo['real_loss'] - rt['real_loss']
+        rt['ordering_effect_share'] = (
+            abs(rt['ordering_effect']) / abs(rt['real_loss'])
+            if rt['real_loss'] else 0.0)
+        return rt
+
+    def _fifo_round_trip(self):
+        """Route B. Deliberately written as a separate, plainer pass over the
+        same primary inputs - oldest tranche first, no pooled average anywhere -
+        so that agreement with round_trip() is evidence rather than restatement.
+        """
+        raises = self.resolved_raises()
+        by_year = {}
+        for r in raises:
+            by_year.setdefault(r.fiscal_year, []).append(r)
+        net_shares = self._plan_netted_shares(raises)
+        tranches = []          # [shares remaining, real price paid], oldest first
+        matched = cost = proceeds = 0.0
+        for y in self.years():
+            px_buy = self.real_repurchase_price(y)
+            if self.retired.get(y) and px_buy:
+                tranches.append([self.retired[y], px_buy])
+            for r in by_year.get(y, []):
+                want = net_shares[id(r)]
+                if want <= 0:
+                    continue
+                px_sell = r.price * self.deflator[y]
+                for t in tranches:
+                    if want <= 1e-12:
+                        break
+                    if t[0] <= 1e-12:
+                        continue
+                    d = min(t[0], want)
+                    t[0] -= d
+                    want -= d
+                    matched += d
+                    cost += d * t[1]
+                    proceeds += d * px_sell
+        return {'matched_shares': matched, 'real_cost_matched': cost,
+                'real_proceeds_matched': proceeds, 'real_loss': cost - proceeds}
+
+    def validate_raise_prices(self, traded_range=None):
+        """Every implied issue price must be a price that existed, tested
+        against intra-period highs and lows and never against period-end
+        closes. The same guard the repurchase side has carried since the
+        template was generalized; a raise struck at an impossible price is the
+        same failure as a repurchase struck at one.
+        """
+        fails = []
+        for r in self.resolved_raises():
+            y, px = r.fiscal_year, r.price
+            if traded_range and y in traded_range:
+                lo, hi = traded_range[y]
+            else:
+                v = [self.prices[k] for k in self.cfg.fiscal_months(y)
+                     if k in self.prices]
+                if not v:
+                    continue
+                lo, hi = min(v), max(v)
+                self.notes.append(
+                    f"FY{y} raise price validated against period-end closes "
+                    "only; intra-period extremes are stricter")
+            if not (lo <= px <= hi):
+                fails.append((y, r.label, px, lo, hi))
+        return fails
+
     # ------------------------------------------------- compensation wedge
     def comp_wedge(self, issued):
         # Years with no resolved issuance (defect 4) must not fall back to
@@ -694,6 +1237,22 @@ class BuybackStudy:
                 " - do not publish until resolved")
         self.attribution = self.eps_attribution()
         self.timing_result = self.timing(self.retired)
+        # The round trip runs on every company, including those that never
+        # raised equity. On those it returns a true zero and says so; a company
+        # that did not do the thing is a finding, not a missing input.
+        self.reconcile_raises()
+        self.raise_price_failures = self.validate_raise_prices(traded_range)
+        if self.raise_price_failures:
+            self.notes.append(
+                "IMPLIED ISSUE PRICE OUTSIDE TRADED RANGE in " +
+                ", ".join(f"FY{y}" for y, *_ in self.raise_price_failures) +
+                " - do not publish until resolved")
+        self.round_trip_result = self.round_trip_reconciled()
+        if not self.round_trip_result['has_round_trip']:
+            self.notes.append(
+                "round trip: this company issued no equity inside the window, "
+                "so there is no round trip to measure. Every round-trip total "
+                "is a true zero, not a missing value.")
         self.wedge = self.comp_wedge(self.issued)
         if self.wedge.get('missing_components'):
             self.notes.append(
@@ -703,6 +1262,31 @@ class BuybackStudy:
                 "genuinely zero, and the wedge above is understated by an "
                 "unknown amount")
         return self
+
+    def round_trip_report(self):
+        """The round-trip block, on its own so a company that is being used to
+        prove this one measure need not run the whole study to print it."""
+        rt = getattr(self, 'round_trip_result', None)
+        if rt is None:
+            return []
+        L = ["", "ROUND TRIP (real, base-year dollars)"]
+        if not rt['has_round_trip']:
+            return L + ["  no equity raised inside the window - nothing to match"]
+        L += [f"  shares round-tripped   {rt['matched_shares']:12,.1f} mn"
+              f"   ({100*rt['share_of_program_round_tripped']:.1f}% of shares retired)",
+              f"  real price paid        {rt['real_avg_price_paid_matched']:12,.2f}",
+              f"  real price received    {rt['real_avg_price_received']:12,.2f}",
+              f"  real cost              {rt['real_cost_matched']:12,.0f}",
+              f"  real proceeds          {rt['real_proceeds_matched']:12,.0f}",
+              f"  REAL ROUND-TRIP LOSS   {rt['real_loss']:12,.0f}"
+              f"   ({100*rt['recovery_ratio']:.1f} cents back on the dollar)",
+              f"  FIFO cross-check       {rt['fifo_rebuilt']['real_loss']:12,.0f}"
+              f"   (ordering effect {100*rt['ordering_effect_share']:.1f}%)",
+              f"  loss / program cost    {100*rt['loss_share_of_program']:11,.1f}%"]
+        if rt['unmatched_raise_shares'] > 1e-9:
+            L += [f"  raised beyond the pool {rt['unmatched_raise_shares']:12,.1f} mn"
+                  "   - new equity, not a round trip; excluded from the loss"]
+        return L
 
     def to_csv(self, path):
         S = self.shares_outstanding()
@@ -779,9 +1363,10 @@ class BuybackStudy:
         if offset >= dilution_absorption_threshold:
             L += ["", f"*** DILUTION OFFSET {100*offset:.1f}% >= "
                       f"{100*dilution_absorption_threshold:.0f}% - {offset_desc.upper()} ***"]
+        L += self.round_trip_report()
         if self.notes:
             L += ["", "NOTES"] + [f"  - {n}" for n in self.notes]
-        if self.price_failures:
+        if self.price_failures or getattr(self, 'raise_price_failures', None):
             L += ["", "*** VALIDATION FAILED - see notes ***"]
         return "\n".join(L)
 
