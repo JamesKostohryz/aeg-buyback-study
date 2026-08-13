@@ -1,0 +1,39 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Run independent verification (verify.py)
+        working-directory: code
+        run: |
+          set -o pipefail
+          python3 verify.py | tee /tmp/verify_output.txt
+          if ! tail -1 /tmp/verify_output.txt | grep -qE '^ALL [0-9]+ CHECKS PASS\.$'; then
+            echo ""
+            echo "::error::verify.py did not print ALL CHECKS PASS on its last line. Failing the build."
+            exit 1
+          fi
+          echo "verify.py: ALL CHECKS PASS confirmed."
+
+      - name: Regression-test the generalized template against Home Depot (11 defect checks)
+        working-directory: code
+        run: |
+          set -o pipefail
+          python3 template_test_HD.py | tee /tmp/hd_output.txt
+          if ! grep -q '^ALL DEFECT-1-THROUGH-9 CHECKS PASS$' /tmp/hd_output.txt; then
+            echo ""
+            echo "::error::template_test_HD.py did not report ALL DEFECT-1-THROUGH-9 CHECKS PASS. Failing the build."
+            exit 1
+          fi
+          echo "template_test_HD.py: all eleven defect checks confirmed passing."
