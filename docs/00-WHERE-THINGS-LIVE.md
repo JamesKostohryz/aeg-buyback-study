@@ -27,6 +27,7 @@ not an independent source.
 | Current work order | `docs/00-METHODOLOGY-ADDENDUM-Generalization-2026-08-12.md` |
 | Entry-effect decomposition | `docs/METHODOLOGY-ADDENDUM-Earnings-Timing-Decomposition-2026-08-13.md` (item 1) |
 | The round trip | `docs/METHODOLOGY-ADDENDUM-Round-Trip-2026-08-13.md` (item 3) |
+| Treasury permanence | `docs/METHODOLOGY-ADDENDUM-Treasury-Permanence-2026-08-13.md` (item 4) |
 | Findings and handoffs | `docs/*FINDINGS*`, `docs/*HANDOFF*` |
 
 ## If you are starting a new session on this project

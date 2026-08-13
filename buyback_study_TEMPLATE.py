@@ -96,7 +96,31 @@ TAGS = {
     # Ordinary employee-plan share issuance, netted out of the round trip so a
     # routine compensation flow cannot masquerade as a distress raise.
     'plan_shares_issued': 'StockIssuedDuringPeriodSharesShareBasedCompensation',
+    # 2026-08-13, treasury permanence (addendum item 4). A company that RETIRES
+    # its repurchased shares has removed them permanently; a company that holds
+    # them in TREASURY has not, and the same arithmetic needs a different word.
+    # Companies rename the balance partway through their history - Home Depot
+    # and Boeing both moved from TreasuryStockShares to TreasuryStockCommonShares
+    # - so both names are carried and merged.
+    'treasury_shares_balance_alt': 'TreasuryStockCommonShares',
+    'treasury_value_balance': 'TreasuryStockValue',
+    'treasury_value_balance_alt': 'TreasuryStockCommonValue',
+    'treasury_shares_reissued': 'StockIssuedDuringPeriodSharesTreasuryStockReissued',
+    'shares_retired_value': 'StockRepurchasedAndRetiredDuringPeriodValue',
 }
+
+# Any one of these carrying a non-zero balance is positive evidence that the
+# company holds repurchased stock rather than cancelling it.
+TREASURY_BALANCE_KEYS = ('treasury_shares_balance', 'treasury_shares_balance_alt',
+                         'treasury_value_balance', 'treasury_value_balance_alt')
+# Weaker but still positive evidence of treasury accounting: a company that
+# tags shares or value ACQUIRED INTO treasury is using the treasury method, even
+# where the balance itself is not in the fixture. It is weaker because a company
+# can acquire into treasury and cancel later, so it never overrides a balance
+# and it is reported as the weaker basis it is.
+TREASURY_FLOW_KEYS = ('treasury_shares_acquired', 'treasury_value_acquired')
+# Any one of these is positive evidence that it cancels.
+RETIREMENT_KEYS = ('shares_retired', 'shares_retired_value')
 
 ROUND_TRIP_RAISE_TAGS = ('ProceedsFromIssuanceOrSaleOfEquity',
                          'ProceedsFromIssuanceOfCommonStock',
@@ -355,6 +379,11 @@ class BuybackStudy:
     raise_reconciling_items: dict = field(default_factory=dict)
     # {fy: {name: $m}} named differences between the equity statement and the
     # financing-activities line. Anything unnamed refuses the year.
+    shares_out: dict = None
+    # {fy: millions} already restated onto today's split basis. Supply this only
+    # where the caller already owns a verified share-count series - Apple's
+    # build chain does - so that one definition of the share count is used
+    # rather than two. Left None, shares_outstanding() reads the tags as usual.
     withholding_in_repurchase_cash: dict = field(default_factory=dict)
     # {fy: $m} where the company presents share repurchases and shares withheld
     # for employee taxes on ONE cash-flow line (American Airlines does), the
@@ -394,6 +423,8 @@ class BuybackStudy:
         Apple's direct tag turned out to be the less common pattern, not the
         norm.
         """
+        if self.shares_out is not None:
+            return self.shares_out
         raw = self.sec.get('shares_outstanding', {})
         if raw:
             return {y: e['val'] * self.cfg.split_factor(e['filed']) / 1e6
@@ -784,6 +815,232 @@ class BuybackStudy:
                 'allocation_across_years': dw / ew - 1,
                 'combined': dw / mk - 1,
                 'pe_paid': pe_paid, 'pe_market': pe_mkt}
+
+    # ------------------------------------------------- treasury permanence
+    # ADDENDUM ITEM 4, built 2026-08-13. Section 7's measure divides cash by the
+    # reduction in shares outstanding and calls it the cost of removing a share
+    # PERMANENTLY. For a company that cancels its repurchased shares, as Apple
+    # does, that is exactly right. For a company that parks them in treasury -
+    # Home Depot, Boeing, Salesforce, and a large fraction of the market - the
+    # shares still exist, can be reissued tomorrow, and the reduction is a
+    # decision rather than a fact.
+    #
+    # The arithmetic does not change and no figure moves. The WORD changes, from
+    # "permanently removed" to "withdrawn from the float", and the treasury
+    # balance is disclosed alongside it as the reissuable overhang. An honest
+    # label on the same number.
+
+    def treasury_status(self):
+        """Does this company cancel its repurchased shares or hold them?
+
+        Decided from the filings, never assumed, and never inferred from the
+        absence of something. A company that tags a treasury balance holds; a
+        company that tags a retirement and no treasury balance cancels; a
+        company that tags neither is UNDETERMINED, and an undetermined company
+        gets a label that claims neither permanence nor impermanence rather
+        than a default. Silence in the filings is not evidence of cancellation.
+        """
+        bal_shares = {}
+        for key in ('treasury_shares_balance', 'treasury_shares_balance_alt'):
+            for y, e in self.sec.get(key, {}).items():
+                v = e['val'] * self.cfg.split_factor(e['filed']) / 1e6
+                prev = bal_shares.get(y)
+                if prev is None or e['filed'] > prev[1]:
+                    bal_shares[y] = (v, e['filed'])
+        bal_shares = {y: v for y, (v, _) in bal_shares.items()}
+
+        bal_value = {}
+        for key in ('treasury_value_balance', 'treasury_value_balance_alt'):
+            for y, e in self.sec.get(key, {}).items():
+                prev = bal_value.get(y)
+                if prev is None or e['filed'] > prev[1]:
+                    bal_value[y] = (abs(e['val']) / 1e6, e['filed'])
+        bal_value = {y: v for y, (v, _) in bal_value.items()}
+
+        has_balance = any(v for v in bal_shares.values()) or any(
+            v for v in bal_value.values())
+        has_retirement = any(self.sec.get(k) for k in RETIREMENT_KEYS)
+
+        # Where the share count in treasury is not tagged but both the issued
+        # and outstanding counts are, the overhang is their difference. That is
+        # arithmetic on two filed facts, not an estimate, and it is the only
+        # route available on a company like Salesforce, which tags the treasury
+        # VALUE and never the share count.
+        derived_from = None
+        if not bal_shares:
+            issued = self.sec.get('shares_issued', {})
+            out = self.sec.get('shares_outstanding', {})
+            for y in sorted(set(issued) & set(out)):
+                i = issued[y]['val'] * self.cfg.split_factor(issued[y]['filed'])
+                o = out[y]['val'] * self.cfg.split_factor(out[y]['filed'])
+                if i - o > 0:
+                    bal_shares[y] = (i - o) / 1e6
+            if bal_shares:
+                derived_from = ('CommonStockSharesIssued less '
+                                'CommonStockSharesOutstanding')
+
+        reissued = {y: e['val'] * self.cfg.split_factor(e['filed']) / 1e6
+                    for y, e in self.sec.get('treasury_shares_reissued', {}).items()}
+
+        has_treasury_flow = any(self.sec.get(k) for k in TREASURY_FLOW_KEYS)
+
+        if has_balance or bal_shares:
+            holds, basis = True, 'treasury'
+            ev = []
+            for key in TREASURY_BALANCE_KEYS:
+                if self.sec.get(key):
+                    ev.append(TAGS[key])
+            evidence = ("holds repurchased shares in treasury; " +
+                        ("tagged " + ", ".join(ev) if ev else
+                         "shares issued exceed shares outstanding") +
+                        (f"; overhang share count derived as {derived_from}"
+                         if derived_from else ""))
+            if has_retirement:
+                # Acquires into treasury AND cancels. Boeing and American
+                # Airlines both do this at different times. The balance is what
+                # governs: whatever is still sitting there has not been
+                # cancelled, whatever else the company also did.
+                evidence += ("; NOTE this company ALSO tags a retirement, so it "
+                             "both parks and cancels - the label follows the "
+                             "balance that remains, which has not been cancelled")
+        elif has_treasury_flow:
+            holds, basis = True, 'treasury'
+            evidence = ("acquires shares into treasury; tagged " +
+                        ", ".join(TAGS[k] for k in TREASURY_FLOW_KEYS
+                                  if self.sec.get(k)) +
+                        ", and tags no retirement in any year. No treasury "
+                        "BALANCE is available, so the size of the reissuable "
+                        "overhang is not known from these inputs - only that "
+                        "there is one")
+        elif has_retirement:
+            holds, basis = False, 'retired'
+            evidence = ("cancels its repurchased shares; tagged " +
+                        ", ".join(TAGS[k] for k in RETIREMENT_KEYS
+                                  if self.sec.get(k)) +
+                        " and no treasury balance in any year")
+        else:
+            holds, basis = None, 'undetermined'
+            evidence = ("neither a retirement nor a treasury balance is tagged "
+                        "in any year, so whether repurchased shares were "
+                        "cancelled or parked cannot be read off the filings")
+
+        last = max(bal_shares) if bal_shares else None
+        status = {
+            'holds_treasury': holds,
+            'basis': basis,
+            'evidence': evidence,
+            'overhang_shares': bal_shares,
+            'overhang_value': bal_value,
+            'overhang_shares_latest': bal_shares.get(last),
+            'overhang_value_latest': bal_value.get(max(bal_value)) if bal_value else None,
+            'overhang_derived_from': derived_from,
+            'reissued': reissued,
+            'reissued_total': sum(reissued.values()) if reissued else 0.0,
+        }
+        self.treasury = status
+        return status
+
+    # The three readings of what one share cost, and the word that goes with
+    # each. Only the middle one changes; A is the transacted price under every
+    # regime and needs no qualifier.
+    PERMANENCE_LABEL = {
+        'retired': 'permanently removed',
+        'treasury': 'withdrawn from the float',
+        'undetermined': 'removed from the count',
+    }
+    PERMANENCE_NOTE = {
+        'retired': ('These shares were cancelled. The reduction is permanent '
+                    'and cannot be reversed without a new issuance.'),
+        'treasury': ('These shares were NOT cancelled. They sit in treasury, '
+                     'they can be reissued at the board\'s discretion, and the '
+                     'reduction in the float is a decision rather than a fact. '
+                     'The reissuable overhang is disclosed alongside.'),
+        'undetermined': ('Whether these shares were cancelled or parked in '
+                         'treasury is not determinable from the filings, so no '
+                         'claim about permanence is made in either direction.'),
+    }
+
+    def net_retirement_cost(self, min_net_frac=0.0025):
+        """The four readings of what a share cost, with the permanence label
+        the company's own accounting actually supports.
+
+        A  cash / GROSS shares retired ............. the transacted price
+        B  cash / NET count reduction .............. cost per share {label}
+        C  (cash - plan proceeds) / NET
+        D  (cash + withholding - proceeds) / NET ... total cash spent on the count
+
+        The arithmetic is identical for every company and identical to what it
+        was before this method existed. What varies is the word attached to B,
+        C and D, and whether a reissuable overhang has to be disclosed with
+        them.
+
+        `min_net_frac` is the two-sided denominator guard: a year whose net
+        reduction is below this fraction of opening shares reports the fact
+        instead of a ratio, because a ratio on a small or negative denominator
+        is meaningless and far more likely to be believed than a missing one.
+        """
+        st = getattr(self, 'treasury', None) or self.treasury_status()
+        S = self.shares_outstanding()
+        g = lambda k, y: self.sec.get(k, {}).get(y, {}).get('val', 0) / 1e6
+
+        years = [y for y in self.years()
+                 if y in self.retired and y in self.issued]
+        net = {y: self.retired[y] - self.issued[y] for y in years}
+        ok = {y: (y - 1) in S and net[y] > min_net_frac * S[y - 1]
+              for y in years}
+        suppressed = [y for y in years if not ok[y]]
+
+        cash = sum(self.sec.get('repurchase_cash', {}).get(y, {}).get('val', 0) / 1e6
+                   - self.withholding_in_repurchase_cash.get(y, 0.0)
+                   for y in years)
+        gross = sum(self.retired[y] for y in years)
+        net_t = sum(net.values())
+        proc = sum(g('issuance_proceeds', y) for y in years)
+        tax = sum(g('tax_withholding', y) for y in years)
+
+        out = {
+            'basis': st['basis'],
+            'label': self.PERMANENCE_LABEL[st['basis']],
+            'permanence_note': self.PERMANENCE_NOTE[st['basis']],
+            'A_gross_price': (cash / gross) if gross else None,
+            'B_per_share': (cash / net_t) if net_t else None,
+            'C_per_share': ((cash - proc) / net_t) if net_t else None,
+            'D_per_share': ((cash + tax - proc) / net_t) if net_t else None,
+            'gross_retired': gross, 'net_reduction': net_t,
+            'cash': cash, 'plan_proceeds': proc, 'withholding': tax,
+            'per_year': {y: ((self.sec.get('repurchase_cash', {})
+                              .get(y, {}).get('val', 0) / 1e6
+                              - self.withholding_in_repurchase_cash.get(y, 0.0))
+                             / net[y]) if ok[y] else None for y in years},
+            'suppressed_years': suppressed,
+            'min_net_frac': min_net_frac,
+            'treasury': st,
+        }
+        if st['basis'] == 'treasury':
+            oh = st['overhang_shares_latest']
+            ohv = st['overhang_value_latest']
+            bits = []
+            if oh is not None:
+                bits.append(f"{oh:,.0f}mn shares")
+                if gross:
+                    bits.append(f"{oh / gross:.2f}x the gross retirement of the window")
+            if ohv is not None:
+                bits.append(f"${ohv:,.0f}m at cost")
+            self.notes.append(
+                "TREASURY, NOT RETIREMENT: " + st['evidence'] + ". The cost per "
+                "share is therefore the cost per share WITHDRAWN FROM THE FLOAT, "
+                "not the cost of removing one permanently. Reissuable overhang: "
+                + (", ".join(bits) if bits else "share count not tagged") +
+                (f". {st['reissued_total']:,.0f}mn treasury shares were in fact "
+                 "reissued inside the window."
+                 if st['reissued_total'] else "."))
+        elif st['basis'] == 'undetermined':
+            self.notes.append(
+                "PERMANENCE UNDETERMINED: " + st['evidence'] + ". The cost per "
+                "share is reported as cost per share removed from the count, "
+                "and no claim is made that the removal is permanent.")
+        self.net_cost = out
+        return out
 
     # --------------------------------------------------------- round trip
     # ADDENDUM ITEM 3, built 2026-08-13. Buy heavily near a peak, then issue
@@ -1237,6 +1494,11 @@ class BuybackStudy:
                 " - do not publish until resolved")
         self.attribution = self.eps_attribution()
         self.timing_result = self.timing(self.retired)
+        # Treasury permanence runs before anything is labelled, so that no
+        # measure in this study claims a share was removed permanently on a
+        # company whose own balance sheet says otherwise.
+        self.treasury_status()
+        self.net_cost = self.net_retirement_cost()
         # The round trip runs on every company, including those that never
         # raised equity. On those it returns a true zero and says so; a company
         # that did not do the thing is a finding, not a missing input.
@@ -1363,6 +1625,26 @@ class BuybackStudy:
         if offset >= dilution_absorption_threshold:
             L += ["", f"*** DILUTION OFFSET {100*offset:.1f}% >= "
                       f"{100*dilution_absorption_threshold:.0f}% - {offset_desc.upper()} ***"]
+        nc = getattr(self, 'net_cost', None)
+        if nc is not None:
+            lab = nc['label'].upper()
+            L += ["", f"WHAT A SHARE COST  ({nc['basis']})",
+                  f"  A gross price paid    {nc['A_gross_price']:14,.2f}",
+                  f"  B cash / net          {nc['B_per_share']:14,.2f}   per share {nc['label']}",
+                  f"  C less plan proceeds  {nc['C_per_share']:14,.2f}",
+                  f"  D plus withholding    {nc['D_per_share']:14,.2f}"]
+            t = nc['treasury']
+            if t['basis'] == 'treasury':
+                oh = t['overhang_shares_latest']
+                L += [f"  reissuable overhang   "
+                      + (f"{oh:14,.0f} mn - these shares were NOT cancelled"
+                         if oh is not None else
+                         "     not tagged - value only")]
+                if t['reissued_total']:
+                    L += [f"  reissued in window    {t['reissued_total']:14,.1f} mn"]
+            if nc['suppressed_years']:
+                L += ["  suppressed years: " +
+                      ", ".join(f"FY{y}" for y in nc['suppressed_years'])]
         L += self.round_trip_report()
         if self.notes:
             L += ["", "NOTES"] + [f"  - {n}" for n in self.notes]

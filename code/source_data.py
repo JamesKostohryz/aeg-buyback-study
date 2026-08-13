@@ -188,6 +188,26 @@ def fiscal_months(fy):
 # against a highest trade of $369.00, reached by a different route. Fiscal 2024
 # and fiscal 2026 have NOT been re-derived from filings in this session and are
 # flagged as such in the build note.
+# Salesforce holds every repurchased share in treasury and cancels none of them.
+# Balance sheet, Form 10-K for the fiscal year ended 31 January 2026 (accession
+# 0001108524-26-000060): 1,073 million shares issued against 929 million
+# outstanding, and "Treasury stock, at cost (32,228)" against (19,507) a year
+# earlier. The accounting policy note states plainly: "The Company accounts for
+# treasury stock under the cost method." Added 2026-08-13 for addendum item 4,
+# because the study had been describing Salesforce's count reduction as
+# permanent, and it is not.
+CRM_TREASURY = {
+    'shares_issued_mn': 1073.0,
+    'shares_outstanding_mn': 929.0,
+    'treasury_shares_mn': 1073.0 - 929.0,
+    'treasury_at_cost_usdm': 32228.0,
+    'treasury_at_cost_prior_usdm': 19507.0,
+    'as_of': '2026-01-31',
+    'source': ('Salesforce, Inc. Form 10-K for the fiscal year ended '
+               '31 January 2026, accession 0001108524-26-000060, consolidated '
+               'balance sheet and the treasury stock accounting policy note'),
+}
+
 CRM_NET_CONTRAST = [
     (2024,  7620, 971, 10.0, 176.0, 318.0),
     (2025,  7829, 962,  9.0, 212.0, 369.0),

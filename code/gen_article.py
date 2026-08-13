@@ -158,19 +158,54 @@ NET_RED = {y: RETIRED[y] - ISSUED[y] for y in FY}
 # is reported in place of the number. The threshold is a fraction of the opening
 # share count rather than a bare sign test.
 NET_MIN_FRAC = 0.0025
-NET_OK = {y: NET_RED[y] > NET_MIN_FRAC * SHARES_OUT[y - 1] for y in FY}
-NET_SUPPRESSED = [y for y in FY if not NET_OK[y]]
 
-net_t = sum(NET_RED[y] for y in FY)
+# 2026-08-13, addendum item 4. The four measures used to be computed here, and
+# again inside the template for every other company, which is two definitions of
+# one quantity - the thing this repository keeps being bitten by. They now come
+# from the template, which also decides the PERMANENCE LABEL from the company's
+# own accounting rather than assuming it. Apple cancels its repurchased shares
+# and tags no treasury balance in any year, so its label is "permanently
+# removed" and every figure below is unchanged to the last decimal; verify.py
+# rebuilds all four independently and the published HTML is checked against
+# them, so a change would fail the build rather than pass quietly.
+import sys as _sys
+_sys.path.insert(0, '..')
+from buyback_study_TEMPLATE import CompanyConfig as _CC, BuybackStudy as _BS
+
+_nc_study = _BS(
+    _CC(ticker="AAPL", cik="0000320193", fy_end_month=9,
+        splits=[("2014-06-09", 7), ("2020-08-31", 4)],
+        first_year=FY[0], last_year=FY[-1]),
+    {}, {'repurchase_cash': {y: {'val': REPURCHASE_CASH[y] * 1e6,
+                                 'filed': '2026-01-01'} for y in FY},
+         'issuance_proceeds': {y: {'val': v * 1e6, 'filed': '2026-01-01'}
+                               for y, v in ISSUANCE_PROCEEDS.items()},
+         'tax_withholding': {y: {'val': v * 1e6, 'filed': '2026-01-01'}
+                             for y, v in TAX_WITHHOLDING.items()},
+         'shares_retired': {y: {'val': v * 1e6, 'filed': '2026-01-01'}
+                            for y, v in SHARES_RETIRED_FILED.items()}},
+    {}, DEFL, {}, shares_out=SHARES_OUT)
+_nc_study.retired, _nc_study.issued = RETIRED, ISSUED
+NETC = _nc_study.net_retirement_cost(min_net_frac=NET_MIN_FRAC)
+
+PERMANENCE = NETC['label']
+assert NETC['basis'] == 'retired', (
+    "Apple is expected to CANCEL its repurchased shares. The template now reads "
+    f"basis={NETC['basis']!r} from the filings, which would make the word "
+    "'permanently' throughout section 7 wrong. Do not publish until resolved.")
+
+NET_OK = {y: NETC['per_year'][y] is not None for y in FY}
+NET_SUPPRESSED = NETC['suppressed_years']
+net_t = NETC['net_reduction']
 # A cash / GROSS shares retired          - the market price paid
 # B cash / NET count reduction           - cost per share permanently removed
 # C (cash - employee proceeds) / NET
 # D (cash + withholding tax - proceeds) / NET  - total cash spent on the count
-M_A = rep_t / ret_t
-M_B = rep_t / net_t
-M_C = (rep_t - proc_t) / net_t
-M_D = (rep_t + tax_t - proc_t) / net_t
-NET_PS = {y: (REPURCHASE_CASH[y] / NET_RED[y]) if NET_OK[y] else None for y in FY}
+M_A = NETC['A_gross_price']
+M_B = NETC['B_per_share']
+M_C = NETC['C_per_share']
+M_D = NETC['D_per_share']
+NET_PS = NETC['per_year']
 ISS_SHARE_OF_RET = iss_t / ret_t
 ISS_SHARE_OF_CASH = mkt_del / rep_t
 
@@ -1129,7 +1164,15 @@ Treating the excess of the net cost over the gross price as a further cost of th
 the same compensation twice.<br><br>
 <b>It is not reportable on a small denominator.</b> Where a company issued nearly as much as it
 bought, the ratio explodes; where it issued more, the ratio is negative and meaningless. The fact is
-reported in place of the number.</div>
+reported in place of the number.<br><br>
+<b>And "permanently" is a claim about the company, not about the measure.</b> It holds for Apple
+because Apple cancels the shares it buys: it tags a retirement in every year and carries no treasury
+stock on its balance sheet at any date in this study. For a company that parks its repurchases in
+treasury instead &mdash; Home Depot, Boeing, Salesforce, and a large part of the market &mdash; the
+shares still exist and can be reissued, so the same arithmetic measures the cost per share
+<i>withdrawn from the float</i> and the reissuable balance has to be disclosed beside it. The
+template now reads which of the two a company is from its own filings and refuses to claim
+permanence where the filings do not support it.</div>
 
 <p>For Apple the effect is real and it is not a scandal. Roughly one dollar in seven of the program
 was buying back stock the company had just issued to its own staff, and correcting for it raises the
@@ -1143,19 +1186,29 @@ ordinary shape of a large software company.</p>
 <div class="exh"><div class="eh">Exhibit 6b &middot; Salesforce, the same measure on a company where it bites</div>
 <table class="fig"><thead><tr><th>Fiscal year</th><th class="r">Repurchase cash $bn</th>
 <th class="r">Shares outstanding mn</th><th class="r">NET reduction mn</th>
-<th class="r">Net retirement cost</th><th class="r">Traded range that year</th>
+<th class="r">Cost per share withdrawn</th><th class="r">Traded range that year</th>
 <th class="r">Cost / highest trade</th></tr></thead>
 <tbody>{rows_crm()}</tbody></table>
 <p class="cap">Contrast case only; no figure here enters any Apple measure. Salesforce tags neither
 <i>StockRepurchasedAndRetiredDuringPeriodShares</i> nor <i>TreasuryStockSharesAcquired</i>, so
 <b>no gross price per share retired can be computed for it at all.</b> The net measure needs only
 repurchase cash and the change in shares outstanding, which every filer reports. Fiscal years are as
-Salesforce labels them. Provenance and the limits of these three rows are in the build note.</p></div>
+Salesforce labels them. <b>The column is headed cost per share <i>withdrawn</i>, not permanently
+removed, and the distinction is not pedantic here:</b> Salesforce cancels nothing. At
+{CRM_TREASURY['as_of']} it had {CRM_TREASURY['shares_issued_mn']:,.0f} million shares issued against
+{CRM_TREASURY['shares_outstanding_mn']:,.0f} million outstanding, so
+{CRM_TREASURY['treasury_shares_mn']:,.0f} million sit in treasury at a cost of
+${CRM_TREASURY['treasury_at_cost_usdm']:,.0f} million, up from
+${CRM_TREASURY['treasury_at_cost_prior_usdm']:,.0f} million a year earlier, and its accounting policy
+note says it carries treasury stock at cost. Those shares can be reissued at the board's discretion.
+Provenance and the limits of these three rows are in the build note.</p></div>
 
 <p class="punch">At its worst Salesforce paid {CRM_WORST[4]/CRM_WORST[6]:,.1f} times the highest price
-its own stock traded that year to remove one share permanently. Apple never paid more than
-{max(NET_PS[y]/FY_HIGH[y] for y in FY):,.2f} times its own fiscal-year high, in
-{max(FY, key=lambda y: NET_PS[y]/FY_HIGH[y])}.</p>
+its own stock traded that year to withdraw one share from the float &mdash; and it did not remove
+that share permanently at all, because every share it has bought is still sitting in its own
+treasury. Apple never paid more than {max(NET_PS[y]/FY_HIGH[y] for y in FY):,.2f} times its own
+fiscal-year high, in {max(FY, key=lambda y: NET_PS[y]/FY_HIGH[y])}, and Apple's shares are
+cancelled.</p>
 
 <p>That comparison is also the argument for reporting the net measure first rather than as an
 appendix. The gross price requires a retirement or treasury count, which many companies do not tag.

@@ -58,6 +58,11 @@ def check(name, condition, detail=""):
 
 
 RAW = json.load(open('hd_sec_raw.json'))
+_FIXTURE_ALIAS = {'treasury_shares_balance': 'TreasuryStockShares',
+                  'treasury_shares_balance_alt': 'TreasuryStockCommonShares',
+                  'treasury_value_balance': 'TreasuryStockValue',
+                  'treasury_shares_reissued': 'StockIssuedDuringPeriodSharesTreasuryStockReissued',
+                  'shares_issued': 'CommonStockSharesIssued'}
 
 # ------------------------------------------------------------------ config
 # Verified against EODHD split history: Home Depot's last split was 3-for-2 on
@@ -91,8 +96,15 @@ for r in rows:
 SEC = {}
 for key in ('repurchase_cash', 'repurchase_accrual', 'shares_retired',
             'treasury_shares_acquired', 'treasury_value_acquired',
-            'issuance_proceeds', 'sbc', 'tax_withholding', 'shares_outstanding'):
-    SEC[key] = parse_concept(RAW.get(key, {'units': {}}))
+            'issuance_proceeds', 'sbc', 'tax_withholding', 'shares_outstanding',
+            # added 2026-08-13 for treasury permanence (addendum item 4). Home
+            # Depot renamed TreasuryStockShares to TreasuryStockCommonShares in
+            # 2024, which is exactly the rename the template's merge machinery
+            # exists for, and is why BOTH are carried.
+            'treasury_shares_balance', 'treasury_shares_balance_alt',
+            'treasury_value_balance', 'treasury_shares_reissued',
+            'shares_issued'):
+    SEC[key] = parse_concept(RAW.get(_FIXTURE_ALIAS.get(key, key), {'units': {}}))
 
 
 def series(key, scale=1e6):
@@ -204,6 +216,56 @@ r105 = study.report()
 check("defect 9 - offset >=100% labeled 'NOT A REPURCHASE PROGRAM' (synthetic)",
       "NOT A REPURCHASE PROGRAM" in r105)
 study.issued = real_issued   # restore before the real report below
+
+# ======================= treasury permanence (addendum item 4, 2026-08-13)
+# Home Depot is the treasury case. It holds every share it has ever repurchased
+# since 1999 and has cancelled none of them, which is why section 7's word
+# "permanently" cannot be used on it.
+_t = study.treasury_status()
+check("item 4 - Home Depot is detected as a TREASURY company from the filings, not assumed",
+      _t['holds_treasury'] is True and _t['basis'] == 'treasury',
+      _t['evidence'])
+
+check("item 4 - the treasury balance survives Home Depot's 2024 tag rename",
+      _t['overhang_shares_latest'] is not None and _t['overhang_shares_latest'] > 700,
+      f"{_t['overhang_shares_latest']:,.0f}mn shares; TreasuryStockShares runs to FY2023 and "
+      "TreasuryStockCommonShares from FY2021, and a single-tag read would have stopped in 2023")
+
+_nc = study.net_retirement_cost()
+check("item 4 - the label is 'withdrawn from the float', never 'permanently removed'",
+      _nc['label'] == 'withdrawn from the float',
+      f"B = ${_nc['B_per_share']:,.2f} per share {_nc['label']}")
+
+check("item 4 - the reissuable overhang exceeds everything the company retired in the window",
+      _t['overhang_shares_latest'] > _nc['gross_retired'],
+      f"{_t['overhang_shares_latest']:,.0f}mn held against {_nc['gross_retired']:,.0f}mn retired, "
+      f"{_t['overhang_shares_latest']/_nc['gross_retired']:.2f}x")
+
+check("item 4 - the arithmetic is unchanged; A is still cash over gross retirement",
+      abs(_nc['A_gross_price'] - _nc['cash'] / _nc['gross_retired']) < 1e-9
+      and abs(_nc['B_per_share'] - _nc['cash'] / _nc['net_reduction']) < 1e-9,
+      f"A ${_nc['A_gross_price']:,.2f}, B ${_nc['B_per_share']:,.2f} - same ratios as before "
+      "item 4; only the word attached to B, C and D changed")
+
+# A RETIRING company must still get the permanence language, or the fix has
+# simply moved the error rather than removed it.
+_ret_syn = BuybackStudy(CFG, FIN,
+                        {'shares_retired': SEC['shares_retired'] or
+                         {2013: {'val': 1e6, 'filed': '2020-01-01'}},
+                         'repurchase_cash': SEC['repurchase_cash']},
+                        PRICES, DEFL, COE)
+check("item 4 - a company that cancels its shares still reads 'permanently removed' (synthetic)",
+      _ret_syn.treasury_status()['basis'] == 'retired'
+      and _ret_syn.PERMANENCE_LABEL['retired'] == 'permanently removed',
+      "the fix must not relabel companies for which the original word was correct")
+
+# And silence must not be read as cancellation.
+_unk = BuybackStudy(CFG, FIN, {'repurchase_cash': SEC['repurchase_cash']},
+                    PRICES, DEFL, COE)
+check("item 4 - a company tagging neither is UNDETERMINED, not silently 'retired'",
+      _unk.treasury_status()['basis'] == 'undetermined'
+      and _unk.treasury_status()['holds_treasury'] is None,
+      "absence of a treasury tag is not evidence of cancellation")
 
 print()
 n_fail = sum(1 for s, *_ in CHECKS if s == "FAIL")

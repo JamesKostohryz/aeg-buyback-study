@@ -7,7 +7,7 @@ prices) and the engine's restated statements. No figure is hand-entered.
 import csv
 from source_data import (REPURCHASE_CASH, REPURCHASE_ACCRUAL, ISSUANCE_PROCEEDS,
                          SBC, TAX_WITHHOLDING, SHARES_OUT, SHARES_RETIRED_FILED,
-                         CRM_NET_CONTRAST, monthly_prices, fiscal_months)
+                         CRM_NET_CONTRAST, CRM_TREASURY, monthly_prices, fiscal_months)
 
 PX = monthly_prices()
 FY = list(range(2013, 2026))

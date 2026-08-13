@@ -323,6 +323,64 @@ OUT.append((_epsr[2025] > _epsr[2021] > _epsr[2020] * 1.4,
 _dep_p = _td.timing_dependence(_td_band["loglinear"]["entry"], _td_band["loglinear"]["timing"])
 _dep_a = _td.timing_dependence(_td_band["normalizer4"]["entry"], _td_band["normalizer4"]["timing"])
 
+# ============ 5c-2. TREASURY PERMANENCE (addendum item 4, added 2026-08-13)
+# Section 7 calls measure B the cost of removing a share PERMANENTLY. That word is
+# a claim about the company's accounting, not about the arithmetic, and it is now
+# read from the filings instead of assumed. Apple earns it; the contrast case in
+# the same section does not, which is why this check exists.
+import sys as _sys0
+_sys0.path.insert(0, '..')
+from buyback_study import CompanyConfig as _CC0, BuybackStudy as _BS0
+
+_ap = _BS0(_CC0(ticker="AAPL", cik="0000320193", fy_end_month=9,
+                splits=[("2014-06-09", 7), ("2020-08-31", 4)],
+                first_year=FY[0], last_year=FY[-1]),
+           {}, {'repurchase_cash': {y: {'val': REPURCHASE_CASH[y] * 1e6,
+                                        'filed': '2026-01-01'} for y in FY},
+                'issuance_proceeds': {y: {'val': v * 1e6, 'filed': '2026-01-01'}
+                                      for y, v in ISSUANCE_PROCEEDS.items()},
+                'tax_withholding': {y: {'val': v * 1e6, 'filed': '2026-01-01'}
+                                    for y, v in TAX_WITHHOLDING.items()},
+                'shares_retired': {y: {'val': v * 1e6, 'filed': '2026-01-01'}
+                                   for y, v in SHARES_RETIRED_FILED.items()}},
+           {}, DEFL, {}, shares_out=SHARES_OUT)
+_ap.retired, _ap.issued = dict(_ret), dict(_iss)
+_apnc = _ap.net_retirement_cost(min_net_frac=0.0025)
+
+OUT.append((_apnc['basis'] == 'retired',
+            "permanence: Apple is read from the filings as CANCELLING its shares", 0, 0, ""))
+OUT.append((_apnc['label'] == 'permanently removed',
+            "permanence: Apple therefore keeps the word 'permanently removed'", 0, 0, ""))
+OUT.append((_ap.treasury_status()['overhang_shares_latest'] is None,
+            "permanence: Apple carries no reissuable treasury overhang at any date", 0, 0, ""))
+
+# The template's four measures must reproduce this file's own independent rebuild.
+# Since 2026-08-13 the published document takes them from the template, so this is
+# the check that the rewire moved nothing.
+chk("permanence: template measure A equals the independent rebuild", _apnc['A_gross_price'], m_a, 1e-9, "$/sh")
+chk("permanence: template measure B equals the independent rebuild", _apnc['B_per_share'], m_b, 1e-9, "$/sh")
+chk("permanence: template measure C equals the independent rebuild", _apnc['C_per_share'], m_c, 1e-9, "$/sh")
+chk("permanence: template measure D equals the independent rebuild", _apnc['D_per_share'], m_d, 1e-9, "$/sh")
+
+# Salesforce, the contrast case in the same section, does NOT earn the word. The
+# study described its count reduction as permanent until 2026-08-13; it is not.
+_crm_treasury = CRM_TREASURY['shares_issued_mn'] - CRM_TREASURY['shares_outstanding_mn']
+chk("permanence: Salesforce shares issued less outstanding is the treasury balance",
+    _crm_treasury, CRM_TREASURY['treasury_shares_mn'], 1e-9, "mn")
+OUT.append((CRM_TREASURY['treasury_at_cost_usdm'] > CRM_TREASURY['treasury_at_cost_prior_usdm'],
+            "permanence: Salesforce's treasury balance GREW year over year, so nothing was cancelled",
+            CRM_TREASURY['treasury_at_cost_usdm'], CRM_TREASURY['treasury_at_cost_prior_usdm'], "$m"))
+
+_crm = _BS0(_CC0(ticker="CRM", cik="0001108524", fy_end_month=1, splits=[],
+                 first_year=2024, last_year=2026),
+            {}, {'treasury_value_balance': {2026: {'val': CRM_TREASURY['treasury_at_cost_usdm'] * 1e6,
+                                                   'filed': '2026-03-01'}}}, {}, {}, {})
+OUT.append((_crm.treasury_status()['basis'] == 'treasury',
+            "permanence: Salesforce is read as a TREASURY company, not a cancelling one", 0, 0, ""))
+OUT.append((_BS0(_CC0("X", "0", 12, [], 1, 2), {}, {}, {}, {}, {}).treasury_status()['basis']
+            == 'undetermined',
+            "permanence: a company tagging neither is UNDETERMINED, never silently 'retired'", 0, 0, ""))
+
 # ================ 5d. THE ROUND TRIP (addendum item 3, added 2026-08-13)
 # Apple is the NULL case for this measure and that is exactly why it belongs here:
 # the round trip now runs unconditionally on every company, so the thing most likely
@@ -497,6 +555,11 @@ present(f"timing accounts for {100*_dep_p:.0f} percent of the headline")
 present(f"timing component is {100*_dep_a:.0f} percent of the headline")
 present(f"put the price decision between {min(d['decision'] for d in _sym)/1000:+,.2f}")
 present(f"put it between {min(d['decision'] for d in _bwd)/1000:+,.2f}")
+present(f"{CRM_TREASURY['treasury_shares_mn']:,.0f} million sit in treasury at a cost of")
+present(f"${CRM_TREASURY['treasury_at_cost_usdm']:,.0f} million")
+present("to withdraw one share from the float")
+present("still sitting in its own treasury")
+present("Cost per share withdrawn")
 present("It is not Neutral Earnings Power")
 present("removes no tranche and no year")
 
