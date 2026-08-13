@@ -32,7 +32,7 @@ not an independent source.
 | Treasury permanence | `docs/METHODOLOGY-ADDENDUM-Treasury-Permanence-2026-08-13.md` (item 4) |
 | The excise tax, and the argument for repurchases | `docs/METHODOLOGY-ADDENDUM-Excise-Tax-2026-08-13.md` (item 5) |
 | Findings and handoffs | `docs/*FINDINGS*`, `docs/*HANDOFF*` |
-| Next session prompt | `docs/00-NEXT-SESSION-PROMPT-Buyback-Study-2026-08-13.md` — most recent wins |
+| Next session prompt | `docs/00-NEXT-SESSION-PROMPT-Buyback-Study-2026-08-13b.md` — most recent wins |
 
 ## If you are starting a new session on this project
 
