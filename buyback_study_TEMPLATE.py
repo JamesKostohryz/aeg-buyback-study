@@ -765,9 +765,24 @@ class BuybackStudy:
                 t = tax[y] / pre[y]
                 oi[y] = op[y] * (1 - t)
                 nfi[y] = (pre[y] - op[y]) * (1 - t)
-        rows, unsplit = {}, []
+        rows, unsplit, unattributed = {}, [], []
         for y in self.years():
             if (y - 1) not in S or y not in S:
+                continue
+            # DEFECT 13, SECOND PASS (2026-08-13, found by running IBM cold
+            # immediately after Oracle). The first pass guarded the tax-rate
+            # inputs and left the earnings and share-count channels reading
+            # NI[y] and NI[y-1] unconditionally. International Business
+            # Machines files NetIncomeLoss only from 2015 - before that the
+            # figure sits under a different element - so the very next company
+            # died on the very next line. The lesson is not "add another
+            # guard": it is that EVERY series this method touches has to be
+            # treated as possibly short, because on a wide enough sample of
+            # filers every one of them is.
+            have_ni = NI.get(y) is not None and NI.get(y - 1) is not None
+            have_eps = EPS.get(y - 1) is not None
+            if not (have_ni and have_eps):
+                unattributed.append(y)
                 continue
             splittable = y in oi and (y - 1) in oi
             if not splittable:
@@ -778,6 +793,12 @@ class BuybackStudy:
                 'operating': ((oi[y] - oi[y - 1]) / S[y]) if splittable else None,
                 'financial': ((nfi[y] - nfi[y - 1]) / S[y]) if splittable else None,
             }
+        if unattributed:
+            self.notes.append(
+                f"EARNINGS ATTRIBUTION NOT COMPUTED AT ALL for FY{unattributed}: "
+                "net income or diluted earnings per share is untagged in that "
+                "year or the one before it. The years are named rather than the "
+                "window being quietly shortened.")
         if unsplit:
             self.notes.append(
                 "EARNINGS ATTRIBUTION NOT SPLIT into operating and financial for "
@@ -867,12 +888,51 @@ class BuybackStudy:
 
     # -------------------------------------------------------------- timing
     def timing(self, retired):
-        ys = [y for y in self.years() if y in retired and retired[y]]
+        """The multiple paid against the multiple on offer, split into
+        within-year execution and across-year allocation.
+
+        DEFECT 14 (2026-08-13, found by running Union Pacific cold). Every
+        quantity here is a ratio, and the old code assumed each denominator was
+        non-empty: a fiscal year with no diluted earnings per share, or a window
+        whose resolved repurchase cash sums to zero, divided by zero and killed
+        the run. Union Pacific reaches the second case. The measure is a
+        weighted average of years, so the honest response is to drop the years
+        it cannot price - naming them - and to REFUSE the whole measure rather
+        than return a shaped zero if nothing priceable is left.
+        """
+        eps = self.fin.get('diluted_eps', {})
+        ys, skipped = [], []
+        for y in self.years():
+            if y not in retired or not retired[y]:
+                continue
+            c = self.sec.get('repurchase_cash', {}).get(y, {}).get('val')
+            e = eps.get(y)
+            p = self.fy_mean_price(y)
+            if c is None or not e or p is None:
+                skipped.append(y)
+                continue
+            ys.append(y)
+        if skipped:
+            self.notes.append(
+                f"TIMING TEST EXCLUDES FY{skipped}: repurchase cash, diluted "
+                "earnings per share or a price for the year is missing, and a "
+                "multiple cannot be struck without all three. The years are "
+                "named rather than the window being quietly shortened.")
         cash = {y: self.sec['repurchase_cash'][y]['val'] / 1e6 for y in ys}
-        eps = self.fin['diluted_eps']
+        tot = sum(cash.values())
+        if not ys or not tot:
+            self.notes.append(
+                "TIMING TEST NOT COMPUTED: no fiscal year in the window has a "
+                "retirement count, repurchase cash and an earnings figure "
+                "together. This is reported as unavailable; it is NOT a zero, "
+                "and nothing downstream may read it as one.")
+            return {'dollar_weighted_pe_paid': None, 'equal_weighted_pe_paid': None,
+                    'market_pe': None, 'execution_within_year': None,
+                    'allocation_across_years': None, 'combined': None,
+                    'pe_paid': {}, 'pe_market': {}, 'excluded_years': skipped,
+                    'available': False}
         pe_paid = {y: (cash[y] / retired[y]) / eps[y] for y in ys}
         pe_mkt = {y: self.fy_mean_price(y) / eps[y] for y in ys}
-        tot = sum(cash.values())
         dw = sum(cash[y] * pe_paid[y] for y in ys) / tot
         ew = sum(pe_paid.values()) / len(ys)
         mk = sum(pe_mkt.values()) / len(ys)
@@ -881,7 +941,8 @@ class BuybackStudy:
                 'execution_within_year': ew / mk - 1,
                 'allocation_across_years': dw / ew - 1,
                 'combined': dw / mk - 1,
-                'pe_paid': pe_paid, 'pe_market': pe_mkt}
+                'pe_paid': pe_paid, 'pe_market': pe_mkt,
+                'excluded_years': skipped, 'available': True}
 
     # ============================================================ entry effect
     # ADDENDUM ITEM 1, PULLED INTO THE TEMPLATE 2026-08-13 (close-out session).
@@ -2164,6 +2225,27 @@ class BuybackStudy:
                        for y in self.retired if y in self.sec['repurchase_cash'])
         tot_q = sum(self.retired.values())
 
+        # DEFECT 14, THIRD INSTANCE (2026-08-13). A window in which NOTHING is
+        # resolved - Union Pacific tags a retirement element but files no
+        # annual figure this template can pair with repurchase cash in any year
+        # of the window - leaves tot_q at zero and every ratio below undefined.
+        # The honest output is a refusal that says which window was asked for
+        # and why nothing could be measured in it, not a crash and certainly
+        # not a page of zeros.
+        if not tot_q:
+            return "\n".join(L + [
+                "",
+                "NO MEASURABLE REPURCHASE IN THIS WINDOW.",
+                f"  Not one fiscal year from FY{self.cfg.first_year} to "
+                f"FY{self.cfg.last_year} has a resolved shares-retired count "
+                "paired with repurchase cash.",
+                f"  Unresolved years: {sorted(self.unresolved_years)}",
+                "  This is a statement about what the filings support, not "
+                "about the company: it may have repurchased heavily and tagged "
+                "it in a way this template cannot read. Re-probe the elements "
+                "and choose a window the data supports before running again.",
+                "", "NOTES"] + [f"  - {n}" for n in self.notes])
+
         # DEFECT 9 FIX (2026-08-12): the offset used to print as a bare
         # percentage no matter how large. The methodology is explicit that
         # once issuance is running close to or above the pace of
@@ -2182,13 +2264,20 @@ class BuybackStudy:
         else:
             offset_desc = "of shares retired"
 
+        # A timing test that could not be struck prints as unavailable. It must
+        # never print as a zero or an em dash the reader can mistake for one
+        # (defect 14).
+        _f = (lambda v, fmt: format(v, fmt) if v is not None else "unavailable")
         L += [f"cash spent            {tot_cash:14,.0f}",
               f"shares retired        {tot_q:14,.0f} mn",
-              f"dollar-wtd price paid {tot_cash/tot_q:14,.2f}",
-              f"dollar-wtd P/E paid   {t['dollar_weighted_pe_paid']:14.2f}",
+              f"dollar-wtd price paid {tot_cash/tot_q:14,.2f}" if tot_q
+              else "dollar-wtd price paid    unavailable - no shares retired",
+              f"dollar-wtd P/E paid   {_f(t['dollar_weighted_pe_paid'], '14.2f')}",
               "",
-              f"execution within year {100*t['execution_within_year']:+13.1f}%",
-              f"allocation across yrs {100*t['allocation_across_years']:+13.1f}%",
+              f"execution within year {_f(t['execution_within_year'] and 100*t['execution_within_year'], '+13.1f')}"
+              + ("%" if t['execution_within_year'] is not None else ""),
+              f"allocation across yrs {_f(t['allocation_across_years'] and 100*t['allocation_across_years'], '+13.1f')}"
+              + ("%" if t['allocation_across_years'] is not None else ""),
               "",
               f"dilution offset       {100*offset:13.1f}%  {offset_desc}",
               f"comp economic cost    {w['economic_cost']:14,.0f}",

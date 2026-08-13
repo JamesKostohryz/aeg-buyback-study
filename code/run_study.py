@@ -64,7 +64,12 @@ UA = "AEG buyback study (james@jameskostohryz.com)"
 # merge_concept_series() joins them and reports what it did.
 # ---------------------------------------------------------------------------
 FIN_TAGS = {
-    'net_income':          (['NetIncomeLoss'], 'update', 1e6),
+    # Alternates are not a convenience; see build_financials(). International
+    # Business Machines files NetIncomeLoss only from 2015 and the earlier years
+    # sit under ProfitLoss, which is why this line has three names on it.
+    'net_income':          (['NetIncomeLoss', 'ProfitLoss',
+                             'NetIncomeLossAvailableToCommonStockholdersBasic'],
+                            'update', 1e6),
     'diluted_eps':         (['EarningsPerShareDiluted'], 'update', 1.0),
     'wtd_diluted_shares':  (['WeightedAverageNumberOfDilutedSharesOutstanding'], 'update', 1e6),
     'operating_income':    (['OperatingIncomeLoss'], 'update', 1e6),

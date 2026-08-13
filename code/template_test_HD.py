@@ -384,6 +384,77 @@ check("the earnings span is the study window plus its opening year, not the file
       and min(_ee.real_eps()) == 2012,
       "source reaches back to 1985; the span binds at 2012")
 
+# -----------------------------------------------------------------------------
+# DEFECT 14 (2026-08-13, found by running Union Pacific cold, third company in a
+# row to expose the same class of bug). Every quantity in the timing test and in
+# the report header is a ratio, and each assumed its denominator was non-empty.
+# A window in which nothing resolves - Union Pacific tags a retirement element
+# but files no annual figure this template can pair with repurchase cash in any
+# year - divided by zero and killed the run.
+#
+# The general lesson, recorded because it is worth more than the fix: a template
+# written against one company encodes that company's COMPLETENESS as well as its
+# arithmetic. Apple has every line in every year. Six untouched companies
+# produced three crashes, every one of them an input assumed present.
+print()
+print("--- defect 14: an empty window refuses, it does not divide by zero ---")
+
+_e14_fin = {
+    'net_income':         {y: 1000.0 for y in range(2012, 2026)},
+    'diluted_eps':        {y: 1.00 for y in range(2012, 2026)},
+    'wtd_diluted_shares': {y: 1000.0 for y in range(2012, 2026)},
+    'operating_income':   {y: 1200.0 for y in range(2012, 2026)},
+    'tax_provision':      {y: 300.0 for y in range(2012, 2026)},
+    'pretax_income':      {y: 1300.0 for y in range(2012, 2026)},
+    'dividends':          {y: 200.0 for y in range(2012, 2026)},
+    'common_equity':      {y: 5000.0 for y in range(2012, 2026)},
+    'total_debt':         {y: 2000.0 for y in range(2012, 2026)},
+}
+_e14 = BuybackStudy(
+    CompanyConfig(ticker="E14", cik="0000000000", fy_end_month=12, splits=[],
+                  first_year=2013, last_year=2025),
+    _e14_fin, {'repurchase_cash': {}}, {(y, 12): 50.0 for y in range(2012, 2026)},
+    {y: 1.0 for y in range(2011, 2027)}, {y: 0.05 for y in range(2011, 2027)},
+    shares_out={y: 1000.0 for y in range(2012, 2026)})
+_e14.retired, _e14.issued = {}, {}
+_e14.unresolved_years = set(range(2013, 2026))
+_t14 = _e14.timing(_e14.retired)
+check("defect 14: the timing test returns unavailable, not a zero",
+      _t14['available'] is False
+      and _t14['dollar_weighted_pe_paid'] is None,
+      "None is unmistakable in a table; 0.00 is not")
+check("defect 14: and it says so in the notes",
+      any('TIMING TEST NOT COMPUTED' in n for n in _e14.notes))
+_e14.timing_result = _t14
+_e14.wedge = {'economic_cost': 0, 'accounting_charge': 0, 'wedge': 0, 'multiple': 0,
+              'caveat': '', 'missing_components': []}
+_e14.price_failures = []
+_r14 = _e14.report()
+check("defect 14: report() refuses the whole window instead of crashing",
+      'NO MEASURABLE REPURCHASE IN THIS WINDOW' in _r14)
+check("defect 14: the refusal names the window and the unresolved years",
+      'FY2013' in _r14 and 'FY2025' in _r14 and 'Unresolved years' in _r14)
+check("defect 14: the refusal does NOT claim the company made no repurchase",
+      'statement about what the filings support, not about the company' in _r14,
+      "a template that cannot read a tag has learned nothing about the business")
+
+# DEFECT 13, SECOND PASS. The first pass guarded the tax-rate inputs and left
+# the earnings channel reading net income unconditionally; International
+# Business Machines files NetIncomeLoss only from 2015 and the very next company
+# died on the very next line.
+_d13b_fin = dict(_d13_fin)
+_d13b_fin['net_income'] = {y: 1000.0 for y in range(2016, 2026)}
+_d13b = BuybackStudy(
+    CompanyConfig(ticker="D13B", cik="0000000000", fy_end_month=12, splits=[],
+                  first_year=2013, last_year=2025),
+    _d13b_fin, {'repurchase_cash': {}}, {}, {y: 1.0 for y in range(2011, 2027)},
+    {y: 0.05 for y in range(2011, 2027)})
+_d13b_rows = _d13b.eps_attribution()
+check("defect 13 second pass: a short net income series does not crash",
+      sorted(_d13b_rows) == list(range(2017, 2026)))
+check("defect 13 second pass: the years with no attribution at all are NAMED",
+      any('EARNINGS ATTRIBUTION NOT COMPUTED AT ALL' in n for n in _d13b.notes))
+
 # THE COLD RUN, REPRODUCED OFFLINE. Oracle, fiscal year ending 31 May, never
 # touched by this project before 2026-08-13. Run live that day through
 # code/run_study.py; the fixtures are committed so it repeats without a network.
