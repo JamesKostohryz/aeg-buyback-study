@@ -184,9 +184,37 @@ _nc_study = _BS(
                              for y, v in TAX_WITHHOLDING.items()},
          'shares_retired': {y: {'val': v * 1e6, 'filed': '2026-01-01'}
                             for y, v in SHARES_RETIRED_FILED.items()}},
-    {}, DEFL, {}, shares_out=SHARES_OUT)
+    PX, DEFL, {}, shares_out=SHARES_OUT)
+_nc_study.sec['repurchase_accrual'] = {y: {'val': REPURCHASE_ACCRUAL[y] * 1e6,
+                                           'filed': '2026-01-01'} for y in FY}
 _nc_study.retired, _nc_study.issued = RETIRED, ISSUED
 NETC = _nc_study.net_retirement_cost(min_net_frac=NET_MIN_FRAC)
+
+# ----------------------------------------- the excise tax (addendum item 5)
+# Apple discloses NO figure for the one percent excise on net repurchases in any
+# year. Its fiscal 2023 note says the $76.6 billion it quotes is stated
+# "excluding excise tax due under the Inflation Reduction Act of 2022", and its
+# fiscal 2024 and fiscal 2025 Forms 10-K, and every 10-Q since, do not use the
+# word at all. Checked live on 2026-08-13 against the rendered filings AND
+# against every inline XBRL element name in them; there is nothing to read.
+#
+# So the template refuses first - allow_statutory_estimate is False by default
+# and would raise here - and this driver then opts in explicitly, which is the
+# only way a number appears. Everything it produces is labelled in the document
+# as this study's arithmetic and not as Apple's disclosure, and none of it
+# enters the reconciled sources-and-uses account, which continues to close on
+# filed facts alone. The reconstruction is proven on O'Reilly Automotive, which
+# does disclose: see code/excise_test_ORLY.py.
+EXCISE = _nc_study.excise_tax(allow_statutory_estimate=True)
+EXC_YEARS = [y for y in FY if EXCISE['years'][y]['exposure'] > 0]
+EXC_LOW, EXC_HIGH = EXCISE['total_low'], EXCISE['total_high']
+EXC_SHARE_OF_CASH = EXC_LOW / sum(REPURCHASE_CASH[y] for y in EXC_YEARS)
+EXC_SHARE_OF_PROGRAM = EXC_LOW / rep_t
+assert EXCISE['undisclosed_years'] == EXC_YEARS, (
+    "Apple is expected to disclose no excise tax in any exposed year. The "
+    f"template now reads {EXCISE['undisclosed_years']} as undisclosed against "
+    f"exposed years {EXC_YEARS}. If Apple has started disclosing, the estimate "
+    "below must be replaced by the filed figure before publishing.")
 
 PERMANENCE = NETC['label']
 assert NETC['basis'] == 'retired', (
@@ -459,6 +487,15 @@ def rows_sources():
         row('Share repurchases', rep_t, pct=True),
         row('Increase in net operating assets', D_NOA, pct=True),
         row('Unreconciled, matching the equity roll-forward residual', UNREC, pct=True),
+        # The excise tax is a MEMORANDUM line, deliberately outside the totals
+        # above. It has to be, for two reasons that both point the same way:
+        # Apple discloses no figure for it, so the number is this study's
+        # arithmetic rather than a filed fact, and the account above closes on
+        # filed facts to a residual that is checked against the equity
+        # roll-forward. Folding an estimate into a reconciled account would
+        # destroy the check that makes the account worth printing.
+        head('Memorandum &mdash; not in the totals above'),
+        row('Excise tax on net repurchases, fiscal 2023-2025, estimated', EXC_LOW),
     ])
 
 
@@ -1285,6 +1322,36 @@ unreconciled line is the same residual that appears in the equity roll-forward &
 comprehensive income and items not separately modelled &mdash; at
 {100*abs(UNREC)/rep_t:.2f} percent of repurchase spending.</p></div>
 
+<p>One line in that exhibit is set apart from the rest deliberately. Since 2023 the United States has
+levied an excise of one percent on the value of stock a company repurchases in a year, net of the
+stock it issues in the same year. It is a real cash cost of a repurchase program and it belongs in an
+account of what the program consumed. Apple does not publish it. Its fiscal 2023 note records that the
+$76.6 billion it quotes is stated excluding the excise tax due under the Inflation Reduction Act of
+2022, and its fiscal 2024 and fiscal 2025 annual reports, and every quarterly report since, do not use
+the word at all. The figure shown is therefore this study's arithmetic and not Apple's disclosure: one
+percent of the repurchases made after the statute took effect, less one percent of the stock issued to
+employees over the same months, which comes to about <b>${EXC_LOW/1000:,.1f} billion</b> across the
+three exposed years, or {100*EXC_SHARE_OF_CASH:.2f} percent of what Apple spent on repurchases in
+them and {100*EXC_SHARE_OF_PROGRAM:.2f} percent of the thirteen-year program. Without the netting the
+same calculation gives ${EXC_HIGH/1000:,.1f} billion, and that end is a true upper bound rather than a
+second guess, because stock issued is never negative. It sits outside the totals above because those
+totals close against Apple's own equity roll-forward to a residual that can be checked, and an
+estimate folded into a reconciled account destroys the thing that makes the account worth printing.</p>
+
+<p>The method is not asserted, it is proven on a company that does disclose. O'Reilly Automotive
+charged $28.8 million, $17.0 million and $18.7 million against equity for this tax in 2023, 2024 and
+2025; the same calculation applied to its filings reproduces those three charges to within four tenths
+of one percent in each year and six hundredths of one percent in total. That exercise also found
+something worth stating, because anyone repeating this work will hit it. O'Reilly's own annual report
+carries two different figures for the same tax. The note on the repurchase program says the excise,
+&ldquo;assessed at one percent of the fair market value of net shares repurchased,&rdquo; was $21.0
+million for 2025; the statement of stockholders' equity in the same document charges $18.7 million.
+The note's figure is one percent of <i>gross</i> repurchases to the rounding it prints, which is
+precisely what its own sentence says it is not. The note is the figure carried in the one element the
+accounting taxonomy provides for this quantity, so a study that read the obvious tag and believed it
+would publish a number twelve percent too high. The equity statement is the charge that reached the
+accounts, and it is the one used here.</p>
+
 <p>Of that total, <b>{100*SH_REP:.0f} percent went into Apple's own shares and
 {100*SH_NOA:.1f} percent into the business.</b> What the two earned could hardly be further
 apart. The repurchase slice bought earnings at a dollar-weighted {DW_PE:.2f} times, which is an entry
@@ -1414,6 +1481,31 @@ of ${NEP:,.2f} capitalized at a real cost of equity of {100*COE_LONGRUN:.2f} per
 {PRICE_REAL_ENGINE/NEP:.1f} times Neutral Earnings Power, a
 <b>{100*(PRICE_REAL_ENGINE/NV_PS-1):.0f} percent premium to Neutral Value</b>. Every dollar of
 repurchase at that price is a bet that the premium is deserved.</p>
+
+<p>One argument in favor of repurchases has been missing from this study and it is the strongest one
+there is. A shareholder who receives a dividend pays tax on it in the year it arrives, whether the
+money was wanted or not. A shareholder of a company that repurchases instead receives nothing, owns a
+marginally larger share of the same business, and pays nothing until the shares are sold &mdash; and
+then only on the gain, net of what the shares cost. For a qualified dividend the rate is the same
+either way, so the advantage is not a rate advantage; it is the deferral itself, the recovery of
+basis, and the real possibility that the tax is never paid at all, because the shares are given to
+charity or held until death. That is not an accounting artifact or a presentational preference. It is
+a transfer of value to the continuing holder, it comes at the expense of the public purse rather than
+of the company, and it attaches to every dollar of repurchase.</p>
+
+<p>It is deliberately not quantified here, and the reason is not squeamishness. Its size depends on
+facts about the holder that neither Apple nor this study knows: the rate that would have applied to
+the dividend, the holding period, the cost basis, and whether the account is taxable at all. A pension
+fund, an individual retirement account and many foreign holders capture none of it; a taxable
+individual who never sells captures a great deal. Any single number put on it would be a number about
+an assumed shareholder rather than about Apple, and this study puts no numbers on assumed people. What
+can be said without assuming anything is the direction, and the direction is real: it favors
+repurchases, it is not small, and nothing in the preceding twelve sections offsets it. What it does
+not do is disturb what those sections found. The deferral is worth the same proportion of every dollar
+whether that dollar buys a share at eleven times earnings or at thirty-five, so it makes repurchasing
+a better way to return cash than paying a dividend without making an expensive repurchase any better
+than a cheap one. The excise tax set out in section nine runs the other way, and is far smaller than this. Neither
+changes which half of this program was the good half.</p>
 
 <p class="punch">A repurchase is worth doing when the shares are worth more than they cost. Apple's
 program spent its first half buying at a discount to Neutral Value and its second half buying at a

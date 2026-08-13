@@ -18,9 +18,11 @@ not an independent source.
 | Generalized template | `buyback_study_TEMPLATE.py` — the ONLY copy. `buyback_study.py` is a re-export shim with no code in it (changed 2026-08-13; it used to be a hand-synced byte-identical copy) |
 | Apple build chain | `code/gen_article.py`, `code/build.py`, `code/source_data.py` |
 | Independent verification | `code/verify.py` — CI-gated, must print `ALL <n> CHECKS PASS.` |
-| Home Depot regression test | `code/template_test_HD.py` — CI-gated, eleven checks |
+| Home Depot regression test | `code/template_test_HD.py` — CI-gated, eleven defect checks plus seven item-4 checks |
 | Round-trip proving fixture | `code/roundtrip_test_AAL.py` — CI-gated, twenty-seven checks. American Airlines, and NOT a study of it |
 | Round-trip fixtures | `code/aal_sec_raw.json`, `code/aal_monthly.csv`, `code/aal_traded_range.csv` |
+| Excise-tax proving fixture | `code/excise_test_ORLY.py` — CI-gated, thirty-seven checks. O'Reilly Automotive, and NOT a study of it |
+| Excise-tax fixtures | `code/orly_sec_raw.json`, `code/orly_monthly.csv` |
 | Costco study | `code/run_COST.py`, `code/full_study_COST.py` |
 | Published Apple study | `Buyback-Study-AAPL.html` |
 | Methodology | `docs/00-Buyback-Study-METHODOLOGY-2026-08-09.md` |
@@ -28,6 +30,7 @@ not an independent source.
 | Entry-effect decomposition | `docs/METHODOLOGY-ADDENDUM-Earnings-Timing-Decomposition-2026-08-13.md` (item 1) |
 | The round trip | `docs/METHODOLOGY-ADDENDUM-Round-Trip-2026-08-13.md` (item 3) |
 | Treasury permanence | `docs/METHODOLOGY-ADDENDUM-Treasury-Permanence-2026-08-13.md` (item 4) |
+| The excise tax, and the argument for repurchases | `docs/METHODOLOGY-ADDENDUM-Excise-Tax-2026-08-13.md` (item 5) |
 | Findings and handoffs | `docs/*FINDINGS*`, `docs/*HANDOFF*` |
 | Next session prompt | `docs/00-NEXT-SESSION-PROMPT-Buyback-Study-2026-08-13.md` — most recent wins |
 

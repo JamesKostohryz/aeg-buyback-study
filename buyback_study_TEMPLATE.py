@@ -107,7 +107,34 @@ TAGS = {
     'treasury_value_balance_alt': 'TreasuryStockCommonValue',
     'treasury_shares_reissued': 'StockIssuedDuringPeriodSharesTreasuryStockReissued',
     'shares_retired_value': 'StockRepurchasedAndRetiredDuringPeriodValue',
+    # 2026-08-13, the excise tax (addendum item 5). This is the ONLY element in
+    # the us-gaap taxonomy carrying the Inflation Reduction Act excise on net
+    # repurchases, and on the one company found filing it, it is NOT the figure
+    # that agrees with that company's own statement of stockholders' equity -
+    # see excise_tax() for the O'Reilly finding and for why the equity statement
+    # wins where the two disagree. Most companies that disclose the quantity at
+    # all use a company EXTENSION element under their own namespace (nflx:,
+    # orly:, vrsn: and mck: were each found using a different name for it),
+    # which cannot be reached through the us-gaap company-concept URL at all;
+    # those have to be read off the filing and passed in through `disclosed`.
+    'excise_tax': 'ShareRepurchaseProgramExciseTax',
 }
+
+# Internal Revenue Code section 4501, enacted by the Inflation Reduction Act of
+# 2022. One percent of the fair market value of stock repurchased during the
+# taxable year, REDUCED by the fair market value of stock ISSUED during the same
+# year - the netting rule, which is not optional and is not small: on O'Reilly
+# Automotive it removes between eleven and eighteen percent of the gross tax in
+# each of the three years measured. Applies to repurchases made AFTER
+# 2022-12-31, so a fiscal year straddling that date is only partly exposed.
+EXCISE_RATE = 0.01
+EXCISE_EFFECTIVE_AFTER = (2022, 12)
+
+
+class ExciseTaxUndisclosed(RuntimeError):
+    """Raised when a fiscal year is exposed to the excise tax and no filed
+    figure can be found for it. It exists so that the tax cannot become zero by
+    default in a table that reconciles to the dollar elsewhere."""
 
 # Any one of these carrying a non-zero balance is positive evidence that the
 # company holds repurchased stock rather than cancelling it.
@@ -1064,6 +1091,182 @@ class BuybackStudy:
     # This is ex-post disclosure. It moves no valuation number, it is not an
     # expense, it does not enter the abnormal earnings growth account, and it
     # states no view about Intrinsic Value.
+
+    # ------------------------------------------- excise tax (addendum item 5)
+    def excise_exposure(self, y):
+        """Fraction of fiscal year `y` that falls after 2022-12-31, by month.
+
+        The excise applies to repurchases made after that date, not to fiscal
+        years beginning after it. A September year end therefore has a first
+        exposed year that is only three quarters exposed, and a January year end
+        one that is eleven twelfths exposed. Charging a full year of tax to a
+        partly exposed year would overstate it, and doing so silently is exactly
+        the failure this study keeps finding.
+
+        This is a proration by MONTHS, not by repurchase activity, because the
+        study cannot see within-year repurchase timing. It is an approximation
+        and is announced as one wherever it is used.
+        """
+        months = self.cfg.fiscal_months(y)
+        if not months:
+            return 0.0
+        return sum(1 for m in months if m > EXCISE_EFFECTIVE_AFTER) / len(months)
+
+    def excise_tax(self, disclosed=None, allow_statutory_estimate=False,
+                   rate=EXCISE_RATE):
+        """The Inflation Reduction Act excise on net repurchases, per year.
+
+        WHY THIS METHOD IS NOT A ONE-LINE TAG READ, WHICH IS WHAT THE WORK ORDER
+        ASSUMED. Three things were established against live filings on
+        2026-08-13 and each of them breaks the obvious implementation:
+
+        1. There is no `ExciseTaxPayable`. The only us-gaap element for this is
+           `ShareRepurchaseProgramExciseTax`. Companies that disclose the figure
+           mostly do it through their own extension elements, under four
+           different names on the four companies checked, and an extension
+           element is not reachable through the us-gaap concept interface and
+           does not appear in `companyfacts` at all. So a driver may have to
+           read the number off the filing and hand it in through `disclosed`.
+
+        2. Where BOTH disclosures exist they can disagree, and the tagged one is
+           the wrong one. O'Reilly Automotive's fiscal 2025 note says the excise
+           "assessed at one percent of the fair market value of NET shares
+           repurchased, was $21.0 million"; the statement of stockholders'
+           equity in the same filing charges $18.720 million. The note's figure
+           is one percent of GROSS repurchases to the rounding presented
+           ($2,096.962m x 1% = $20.970m, which prints as $21.0m); the equity
+           statement's is not, and the difference is the netting rule the note's
+           own sentence claims to have applied. The equity statement is the
+           charge that actually hit the accounts, so it wins, and a disagreement
+           is reported rather than resolved by preference.
+
+        3. It is accrued in one year and PAID in the next. O'Reilly accrued
+           $28.830m in 2023 and paid nothing; paid $28.830m in 2024 against a
+           2024 accrual of $17.011m; paid $17.012m in 2025. A sources-and-uses
+           table is a cash account, so the accrual year and the payment year are
+           not the same year and must not be quietly merged.
+
+        `disclosed` is {fiscal_year: $m}, or {fiscal_year: (accrual $m, source)}.
+        Pass what the filing says. Anything passed here is treated as filed fact.
+
+        `allow_statutory_estimate` is the gate. Left False - the default - a
+        fiscal year with any exposure and no disclosed figure raises
+        ExciseTaxUndisclosed, because a company that does not publish the number
+        must not be silently credited with a zero. Set True only when the
+        absence has been checked and is itself the finding, and the study is
+        prepared to publish a reconstruction that is labelled, in the document,
+        as the study's own arithmetic rather than the company's disclosure.
+
+        THE RECONSTRUCTION IS A BAND, NEVER A POINT, and both ends are printed.
+        The upper end is one percent of gross repurchases: an upper bound,
+        because the netting rule can only reduce the base and stock issued is
+        never negative. The lower end nets the fair market value of shares
+        issued during the year, valued at the fiscal year's mean price. The
+        gross end is computed twice from two independently filed lines - the
+        cash-flow repurchase line and the equity-statement repurchase line -
+        which is the same pair the study already carries and reconciles
+        elsewhere, so the cash-versus-accrual spread is visible here too.
+        """
+        disclosed = dict(disclosed or {})
+        for y, e in (self.sec.get('excise_tax') or {}).items():
+            if y not in disclosed:
+                disclosed[y] = (e['val'] / 1e6,
+                                'us-gaap:' + TAGS['excise_tax'] + ' (tagged)')
+
+        g = lambda k, y: self.sec.get(k, {}).get(y, {}).get('val', 0) / 1e6
+        years, undisclosed, notes = {}, [], []
+        for y in self.years():
+            exposure = self.excise_exposure(y)
+            if exposure <= 0:
+                years[y] = {'exposure': 0.0, 'status': 'pre-statute',
+                            'disclosed': None, 'value': 0.0, 'low': 0.0,
+                            'high': 0.0, 'source': 'statute not yet in force'}
+                continue
+
+            gross_cash = (g('repurchase_cash', y)
+                          - self.withholding_in_repurchase_cash.get(y, 0.0))
+            gross_accrual = g('repurchase_accrual', y)
+            px = self.fy_mean_price(y)
+            iss = getattr(self, 'issued', {}).get(y)
+            issued_fmv = (iss * px) if (iss is not None and px) else None
+
+            high = rate * gross_cash * exposure
+            high_accrual = (rate * gross_accrual * exposure
+                            if gross_accrual else None)
+            low = (rate * max(gross_cash - issued_fmv, 0.0) * exposure
+                   if issued_fmv is not None else None)
+
+            d = disclosed.get(y)
+            if d is not None:
+                val, src = d if isinstance(d, tuple) else (d, 'filed')
+                years[y] = {'exposure': exposure, 'status': 'disclosed',
+                            'disclosed': val, 'value': val, 'low': val,
+                            'high': val, 'source': src,
+                            'statutory_high': high, 'statutory_low': low,
+                            'statutory_high_accrual': high_accrual,
+                            'issued_fmv': issued_fmv}
+                continue
+
+            undisclosed.append(y)
+            if not allow_statutory_estimate:
+                raise ExciseTaxUndisclosed(
+                    f"{self.cfg.ticker} FY{y} is {100*exposure:.0f}% exposed to "
+                    "the section 4501 excise on net repurchases and no filed "
+                    "figure for it was found, in the us-gaap tag or in anything "
+                    "handed in through `disclosed`. It is NOT zero. Either "
+                    "supply the filed figure or set allow_statutory_estimate="
+                    "True and publish the reconstruction as an announced "
+                    "estimate.")
+            years[y] = {
+                'exposure': exposure, 'status': 'estimated', 'disclosed': None,
+                'value': low if low is not None else high,
+                'low': low if low is not None else high, 'high': high,
+                'statutory_high': high, 'statutory_low': low,
+                'statutory_high_accrual': high_accrual,
+                'issued_fmv': issued_fmv,
+                'source': ('statutory reconstruction - the company discloses no '
+                           'figure for this year'),
+            }
+
+        if undisclosed:
+            notes.append(
+                "EXCISE TAX NOT DISCLOSED in " +
+                ", ".join(f"FY{y}" for y in undisclosed) +
+                ". The one percent excise under section 4501 applied to these "
+                "years and the company publishes no figure for it, so every "
+                "excise number shown for them is this study's own arithmetic "
+                "and not a filed fact. It is presented as a band whose upper "
+                "end is one percent of gross repurchases and whose lower end "
+                "applies the netting rule at the fiscal year's mean price.")
+        straddle = [y for y, r in years.items() if 0 < r['exposure'] < 1]
+        if straddle:
+            notes.append(
+                "excise exposure is PARTIAL in " +
+                ", ".join(f"FY{y} ({100*years[y]['exposure']:.0f}%)"
+                          for y in sorted(straddle)) +
+                ", because the statute reaches repurchases made after "
+                "2022-12-31 and that fiscal year straddles the date. The "
+                "proration is by months, not by repurchase activity, which the "
+                "filings do not show.")
+        if any(r['status'] == 'estimated' for r in years.values()):
+            notes.append(
+                "the excise is assessed on a TAXABLE year; this study prorates "
+                "onto FISCAL years, and where the two differ the annual split "
+                "is approximate even though the total is not.")
+
+        live = [r for r in years.values() if r['exposure'] > 0]
+        out = {
+            'rate': rate, 'years': years, 'notes': notes,
+            'undisclosed_years': undisclosed,
+            'any_exposure': bool(live),
+            'all_disclosed': bool(live) and not undisclosed,
+            'total_low': sum(r['low'] for r in live) if live else 0.0,
+            'total_high': sum(r['high'] for r in live) if live else 0.0,
+            'total': sum(r['value'] for r in live) if live else 0.0,
+        }
+        self.excise = out
+        self.notes.extend(notes)
+        return out
 
     def real_repurchase_price(self, y):
         """Real price paid per share retired in fiscal year y, in base-year

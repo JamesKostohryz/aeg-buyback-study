@@ -38,6 +38,18 @@ jobs:
           fi
           echo "template_test_HD.py: all eleven defect checks confirmed passing."
 
+      - name: Prove the excise tax on O'Reilly Automotive (addendum item 5)
+        working-directory: code
+        run: |
+          set -o pipefail
+          python3 excise_test_ORLY.py | tee /tmp/exc_output.txt
+          if ! grep -qE '^ALL [0-9]+ EXCISE CHECKS PASS$' /tmp/exc_output.txt; then
+            echo ""
+            echo "::error::excise_test_ORLY.py did not report ALL EXCISE CHECKS PASS. Failing the build."
+            exit 1
+          fi
+          echo "excise_test_ORLY.py: all excise checks confirmed passing."
+
       - name: Prove the round trip on American Airlines (addendum item 3)
         working-directory: code
         run: |

@@ -563,6 +563,60 @@ present("Cost per share withdrawn")
 present("It is not Neutral Earnings Power")
 present("removes no tranche and no year")
 
+# ==================================== 9. THE EXCISE TAX (addendum item 5, 2026-08-13)
+# Rebuilt here from the primary-source dictionaries directly, with no reference to
+# the template's excise_tax() and no import of gen_article, so the published figure
+# is tested rather than echoed. The exposure proration is recomputed from the
+# fiscal calendar rather than copied.
+_EXC_RATE = 0.01
+_exc_low, _exc_high, _exc_expo = 0.0, 0.0, {}
+for y in FY:
+    months = [(y - 1, m) for m in range(10, 13)] + [(y, m) for m in range(1, 10)]
+    expo = sum(1 for cm in months if cm > (2022, 12)) / 12.0
+    _exc_expo[y] = expo
+    if expo == 0:
+        continue
+    _px = [PX[k] for k in months if k in PX]
+    _mean = sum(_px) / len(_px)
+    _gross = REPURCHASE_CASH[y]
+    _iss_fmv = ISSUED[y] * _mean
+    _exc_high += _EXC_RATE * _gross * expo
+    _exc_low += _EXC_RATE * max(_gross - _iss_fmv, 0.0) * expo
+
+OUT.append((sorted(y for y in FY if _exc_expo[y] > 0) == [2023, 2024, 2025],
+            "excise: exactly fiscal 2023-2025 are exposed to the statute",
+            len([y for y in FY if _exc_expo[y] > 0]), 3, "yrs"))
+chk("excise: fiscal 2023 is three quarters exposed, not fully",
+    _exc_expo[2023], 0.75, 1e-12, "share")
+chk("excise: fiscal 2024 and 2025 are fully exposed",
+    _exc_expo[2024] + _exc_expo[2025], 2.0, 1e-12, "share")
+OUT.append((_exc_low < _exc_high,
+            "excise: the netted end is below the gross end, so netting bit",
+            _exc_low, _exc_high, "$m"))
+# The gross end is a true upper bound and is asserted as one here: one percent of
+# the exposed repurchase cash, computed without touching the loop above.
+_gross_bound = _EXC_RATE * (0.75 * REPURCHASE_CASH[2023] + REPURCHASE_CASH[2024]
+                            + REPURCHASE_CASH[2025])
+chk("excise: gross end equals 1% of exposed repurchase cash, second route",
+    _exc_high, _gross_bound, 1e-9, "$m")
+OUT.append((_exc_low / rep_t < 0.01,
+            "excise: the whole estimate is under one percent of the program",
+            100 * _exc_low / rep_t, 1.0, "%"))
+# And the published figures must be the ones just rebuilt.
+present(f"comes to about ${_exc_low/1000:,.1f} billion across the three exposed years")
+present(f"same calculation gives ${_exc_high/1000:,.1f} billion")
+present(f"{100*_exc_low/sum(REPURCHASE_CASH[y] for y in (2023,2024,2025)):.2f} percent of what Apple spent")
+present("this study's arithmetic and not Apple's disclosure")
+present("stated excluding the excise tax due under the Inflation Reduction Act of")
+present("O'Reilly Automotive charged $28.8 million, $17.0 million and $18.7 million")
+present("would publish a number twelve percent too high")
+present("Memorandum \u2014 not in the totals above")
+# The tax-deferral argument, present and deliberately unquantified.
+present("in favor of repurchases has been missing from this study and it is the strongest one there is")
+present("it is the deferral itself, the recovery of")
+present("this study puts no numbers on assumed people")
+present("without making an expensive repurchase any better")
+
 # ------------------------------------------------------------------- report
 print("=" * 92)
 print("INDEPENDENT VERIFICATION OF THE REWRITTEN SECTIONS")
