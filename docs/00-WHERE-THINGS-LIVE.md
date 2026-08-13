@@ -3,6 +3,11 @@
 **As of 2026-08-12, the source of truth is this repository:
 `github.com/JamesKostohryz/aeg-buyback-study`.**
 
+**HARDENING PASS, 2026-08-13, repo tip `4ff5d77`.** Twenty-one untouched companies run
+cold, nine failures, defects 15 to 25 fixed. Next steps in
+`docs/00-NEXT-SESSION-Hardening-Continued-2026-08-13.md`. The cost of equity is proven
+to be an input rather than a mechanic by `code/coe_invariance_test.py`, a fifth CI gate.
+
 **THE TEMPLATE IS CLOSED AS OF 2026-08-13.** Read
 `docs/00-CLOSE-OUT-Template-2026-08-13.md` first. The revision cycle stopped there on
 James's ruling; what follows are applications of the template, not further work on it.
@@ -23,6 +28,7 @@ not an independent source.
 |---|---|
 | Generic driver, ANY ticker | `code/run_study.py` — takes a ticker plus a small configuration block; no company-specific code. This is how a new company is run (2026-08-13) |
 | Earnings-timing decomposition module | `timing_decomposition.py` — moved to the repository ROOT on 2026-08-13 so the template itself can import it. It used to sit in `code/` |
+| Cost-of-equity invariance gate | `code/coe_invariance_test.py` — 104 checks, CI-gated. Proves swapping the rate moves only the rate-dependent quantities |
 | Numeric-token differ | `code/numeric_token_diff.py` — proves a regenerated document moved no figure. The proof standard for pulling a measure into the template |
 | Close-out note | `docs/00-CLOSE-OUT-Template-2026-08-13.md` — **read first** |
 | The cold run | `docs/COLD-RUN-Oracle-2026-08-13.md` and its machine transcript beside it. Oracle fixtures: `code/orcl_sec_raw.json`, `code/orcl_monthly.csv`, `code/orcl_traded_range.csv` |
