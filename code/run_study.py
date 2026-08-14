@@ -285,6 +285,83 @@ def build_financials(raw, expected_years, cfg_obj=None):
     return fin, missing, gaps
 
 
+def check_fiscal_year_end(raw, cfg_obj, years):
+    """DEFECT (2026-08-13, found on Jefferies Financial Group, formerly
+    Leucadia National - a real, well-documented mid-window fiscal year end
+    change, Dec 31 to Nov 30, effective calendar 2018, with an 11-month stub
+    transition year in between). CompanyConfig carries exactly ONE
+    fy_end_month for the whole study window, and nothing before this
+    checked that assumption against what the company actually filed. The
+    dollar and share FIGURES mostly survive a wrong assumption anyway,
+    because parse_concept() keys every fact by the calendar year of its own
+    FILED period end date, not by fy_end_month - but fiscal_months(), which
+    every PRICE lookup in this file depends on (fy_mean_price(),
+    fy_end_price(), the traded-range rollup), is built entirely from
+    fy_end_month and has no independent check on it at all. A wrong
+    fy_end_month averages prices over the WRONG twelve months for every
+    year past the point a company's real fiscal year end diverges from the
+    configured one, and nothing before this said so - it is exactly the
+    "internally consistent, externally wrong" shape this project exists to
+    catch, and it would not necessarily fail the price validator (a
+    one-month shift does not always land outside the year's traded range).
+
+    Checked once, cheaply, against whichever of net_income or diluted_eps
+    is filed: the ACTUAL period-end date carried alongside every SEC fact
+    is compared to the END of the LAST calendar month `fiscal_months(fy)`
+    already says that fiscal year should cover. A gap of more than 20 days
+    is named - the FIRST threshold tried, 45 days, missed Jefferies'
+    December-to-November change entirely, because a one-month shift is
+    itself only about 30 days and every year after the change kept failing
+    to clear 45. 20 days sits above the wobble a normal 52/53-week fiscal
+    year end already carries (Home Depot's real closing dates move by
+    roughly a week year to year) and below the smallest real change this
+    driver could ever be pointed at - a shift by one calendar month. This
+    driver does not attempt to correct for a mismatch once found, because
+    correcting it needs more than one fy_end_month per company and that is
+    a bigger change than a warning.
+    """
+    from datetime import date
+    import calendar as _cal
+    # Merge every alternate tag first, latest FILED wins per year - the same
+    # rule parse_concept()/merge_concept_series() already use everywhere
+    # else - so this checks the single best-known period-end date per year
+    # rather than whichever alternate tag happened to be looked at first.
+    best = {}
+    for key in ('net_income__0', 'net_income__1', 'net_income__2',
+                'diluted_eps__0'):
+        if key not in raw:
+            continue
+        for y, e in parse_concept(raw[key]).items():
+            prev = best.get(y)
+            if prev is None or e['filed'] > prev['filed']:
+                best[y] = e
+    mismatches = []
+    for y in years:
+        if y not in best:
+            continue
+        actual_end = date.fromisoformat(best[y]['end'])
+        exp_y, exp_m = cfg_obj.fiscal_months(y)[-1]
+        exp_last_day = _cal.monthrange(exp_y, exp_m)[1]
+        expected_end = date(exp_y, exp_m, exp_last_day)
+        gap_days = abs((actual_end - expected_end).days)
+        if gap_days > 20:
+            mismatches.append((y, actual_end.isoformat(),
+                               expected_end.isoformat(), gap_days))
+    if mismatches:
+        note('FISCAL YEAR END MISMATCH',
+             "the configured fy-end-month does not match what was actually "
+             "filed for " +
+             "; ".join(f"FY{y} (filed period ends {a}, this driver expected "
+                      f"around {e}, a {g}-day gap)"
+                      for y, a, e, g in mismatches) +
+             ". Every price average this driver computes for the year(s) "
+             "named is drawn from the WRONG twelve calendar months. This is "
+             "the signature of a company that changed its fiscal year end "
+             "inside the study window - supply --first-year/--last-year "
+             "windows that do not straddle the change, or treat the years "
+             "named as unreliable until resolved.")
+
+
 def build_sec(raw):
     return {k: parse_concept(raw[k]) for k in SEC_KEYS if k in raw}
 
@@ -593,6 +670,7 @@ def run(cfg, raw_path, fetch=False, csv_out=None):
     _cfg_obj = CompanyConfig(ticker=cfg.ticker, cik=cik, fy_end_month=cfg.fy_end_month,
                              splits=splits, first_year=cfg.first_year,
                              last_year=cfg.last_year, coe_longrun=cfg.coe_longrun)
+    check_fiscal_year_end(raw, _cfg_obj, years)
     fin, missing, gaps = build_financials(raw, years, _cfg_obj)
     for m in missing:
         note('MISSING LINE', f"no element found for {m}; it is NOT treated as zero")
