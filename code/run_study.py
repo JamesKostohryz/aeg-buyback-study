@@ -383,15 +383,61 @@ def fetch_prices(ticker, token, first_year, last_year, exchange='US'):
     except Exception:                                    # noqa: BLE001
         splits_raw = []
     splits = []
+    rejected_pseudo_splits = []
+    # DEFECT (2026-08-13, found on General Electric during the second
+    # convergence batch; the same shape was flagged but not fixed on IBM
+    # earlier the same day). The vendor's splits endpoint reports a SPINOFF
+    # value adjustment in exactly the same feed and exactly the same shape
+    # as a genuine share split: General Electric shows FOUR entries in its
+    # window, and only one - 2021-08-02, "1.000000/8.000000", the real
+    # 1-for-8 reverse split - is one. The other three land within a few
+    # weeks of GE's HealthCare spinoff (2023-01-04) and GE Vernova spinoff
+    # (2024-04-02), plus a fourth, unexplained one (2019-02-26), and all
+    # three report as an ugly, un-reduced fraction over a large denominator:
+    # "1281.000000/1000.000000", "1253.000000/1000.000000",
+    # "104.000000/100.000000" - a shape no company ever declares a real
+    # split in (nobody splits their stock 1281-for-1000). IBM's Kyndryl
+    # spinoff (2021-11-04) shows the identical signature,
+    # "1046.000000/1000.000000". A genuine split - every one seen in this
+    # repository, including Booking Holdings' 25-for-1 - is reported by the
+    # SAME vendor as a small, already-clean fraction: "25.000000/1.000000",
+    # "1.000000/8.000000". So a raw fraction is trusted as a real split only
+    # if BOTH sides, AS THE VENDOR STATED THEM, before any reduction, are
+    # no larger than 50 - comfortably above every real split ratio this
+    # project has met (the largest is 50-for-1, which is itself the
+    # threshold) and comfortably below every spinoff-adjustment fraction
+    # met so far, which all carry a denominator of 100 or 1000. Rejected
+    # entries are not silently dropped; they are named so a person can
+    # decide whether one of them is a real split this threshold was wrong
+    # to exclude.
+    MAX_SPLIT_FRACTION_TERM = 50
     for s in splits_raw or []:
         a, _, b = (s.get('split') or '').partition('/')
         try:
-            f = float(a) / float(b)
+            fa, fb = float(a), float(b)
+            f = fa / fb
         except (ValueError, ZeroDivisionError):
             continue
-        if f and abs(f - 1.0) > 1e-9:
-            splits.append((s['date'], f))
+        if not f or abs(f - 1.0) <= 1e-9:
+            continue
+        if fa > MAX_SPLIT_FRACTION_TERM or fb > MAX_SPLIT_FRACTION_TERM:
+            rejected_pseudo_splits.append((s['date'], a.strip(), b.strip(), f))
+            continue
+        splits.append((s['date'], f))
     splits.sort()
+    if rejected_pseudo_splits:
+        note('SPLIT VENDOR DATA REJECTED',
+             f"{ticker}: the price vendor's splits feed reported " +
+             ", ".join(f"{d} ({a}/{b}, ratio {f:.4f})"
+                       for d, a, b, f in rejected_pseudo_splits) +
+             " - rejected as a genuine share split because one side of the "
+             "raw fraction exceeds "
+             f"{MAX_SPLIT_FRACTION_TERM}. This shape (an un-reduced fraction "
+             "over a denominator of 100 or 1000) has twice now been a "
+             "SPINOFF value adjustment, not a split, on IBM and General "
+             "Electric. If this company genuinely did split its stock by an "
+             "unusual ratio, this rejection is wrong and the split must be "
+             "supplied explicitly via --config/splits instead of --fetch.")
 
     def factor(datestr):
         """Cumulative split factor to apply to a price quoted on `datestr` to
@@ -562,8 +608,28 @@ def run(cfg, raw_path, fetch=False, csv_out=None):
     for base, alt in (('treasury_shares_balance', 'treasury_shares_balance_alt'),
                       ('treasury_value_balance', 'treasury_value_balance_alt')):
         if sec.get(base) and sec.get(alt):
-            sec[base] = merge_concept_series([sec[base], sec[alt]], mode='update',
-                                             expected_years=years, label=base)
+            # DEFECT (2026-08-13, found on Johnson & Johnson and Chipotle
+            # Mexican Grill during the convergence sweep). Every OTHER merge
+            # in this driver (build_financials(), above) catches a coverage
+            # shortfall and turns it into a named gap; this one, alone,
+            # required full coverage of the whole window and crashed instead
+            # when a company's two treasury tags did not jointly reach it.
+            # Falls back to the plain union - later filing wins on any
+            # overlap, the same rule `mode='update'` already applies when
+            # coverage IS sufficient - and names what is still missing rather
+            # than defaulting it to anything.
+            try:
+                sec[base] = merge_concept_series([sec[base], sec[alt]], mode='update',
+                                                 expected_years=years, label=base)
+            except ValueError as exc:
+                merged = dict(sec[base])
+                merged.update(sec[alt])
+                gap = [y for y in years if y not in merged]
+                sec[base] = merged
+                note('COVERAGE GAP',
+                     f"{base}: {exc} Falling back to the union of the two tags "
+                     "without requiring full coverage" +
+                     (f"; still short {gap}" if gap else "") + ".")
 
     defl, extrap = load_deflator(cfg.deflator, cfg.first_year, cfg.last_year)
     if extrap:

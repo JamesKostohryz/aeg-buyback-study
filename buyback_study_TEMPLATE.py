@@ -930,8 +930,36 @@ class BuybackStudy:
         None is visible in every table it reaches; a silently shorter window is
         not.
         """
-        f, S = self.fin, self.fin['wtd_diluted_shares']
-        NI, EPS = f['net_income'], f['diluted_eps']
+        f = self.fin
+        # DEFECT (2026-08-13, found on Alibaba and Visa during the
+        # convergence sweep). Every per-YEAR read in this method was already
+        # guarded (see the two defect-13 notes above) but the top-level KEYS
+        # were not: a company with no weighted-average diluted share count
+        # tagged under any name this template knows - Alibaba files a 20-F,
+        # not a 10-K, and this driver reads only 10-K facts; Visa's element
+        # coverage gap turned out to be a fetch-window artifact, not absence,
+        # but the crash is identical either way - died with a bare KeyError
+        # before any of the careful per-year handling below ever ran. The
+        # method's own docstring already says the lesson: EVERY series this
+        # method touches has to be treated as possibly short, and that has to
+        # include the series being entirely absent, not just gappy.
+        S = self.fin.get('wtd_diluted_shares')
+        if not S:
+            self.notes.append(
+                "EARNINGS ATTRIBUTION NOT COMPUTED AT ALL: no weighted-average "
+                "diluted share count is tagged under any known name in any "
+                "year. Every channel of this attribution needs it in the "
+                "denominator and none of them can be struck without it.")
+            self._oi = {}
+            return {}
+        NI, EPS = f.get('net_income', {}), f.get('diluted_eps', {})
+        if not NI or not EPS:
+            missing = [n for n, v in (('net income', NI), ('diluted EPS', EPS)) if not v]
+            self.notes.append(
+                "EARNINGS ATTRIBUTION NOT COMPUTED AT ALL: " + " and ".join(missing) +
+                " not tagged under any known name in any year.")
+            self._oi = {}
+            return {}
         pre = f.get('pretax_income', {})
         tax = f.get('tax_provision', {})
         op = f.get('operating_income', {})
@@ -2314,7 +2342,18 @@ class BuybackStudy:
         missing_components = [label for key, label in component_tags
                                if not self.sec.get(key)]
 
-        delivered = sum(issued.get(y, 0) * self.fy_mean_price(y) for y in ys)
+        # DEFECT (2026-08-13, found on Hertz Global Holdings during the
+        # convergence sweep). `fy_mean_price()` is documented to return None
+        # for a fiscal year with no priced calendar month in the series - a
+        # real gap (a trading halt, a bankruptcy reorganization, a ticker
+        # that did not exist yet) rather than a bug in the price fetch - and
+        # this line multiplied it into the market value delivered
+        # unconditionally, which is a TypeError on any company that has one.
+        # Those years are excluded from THIS measure exactly the way
+        # unresolved-issuance years already are, and named the same way.
+        price_missing = [y for y in ys if self.fy_mean_price(y) is None]
+        ys_priced = [y for y in ys if y not in price_missing]
+        delivered = sum(issued.get(y, 0) * self.fy_mean_price(y) for y in ys_priced)
         tax = sum(g('tax_withholding', y) for y in ys)
         proceeds = sum(g('issuance_proceeds', y) for y in ys)
         sbc = sum(g('sbc', y) for y in ys)
@@ -2324,6 +2363,11 @@ class BuybackStudy:
         if unresolved:
             caveat += (f'; excludes {len(unresolved)} unresolved year(s) '
                        'with no determinable issuance')
+        if price_missing:
+            caveat += (f'; excludes {len(price_missing)} year(s) with no '
+                       'priced calendar month in the fiscal year (a trading '
+                       'gap, a halt, or a reorganization) - '
+                       f'FY{sorted(price_missing)}')
         if missing_components:
             caveat += ('; MISSING COMPONENT(S) treated as $0 because this '
                        'company does not tag them at all (not because the '
