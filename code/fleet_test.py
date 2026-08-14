@@ -234,6 +234,23 @@ def drive_azo():
     study, EE = rs.run(cfg, 'azo_sec_raw.json')
     return study
 
+def drive_jef():
+    # Jefferies Financial Group: FY2013-FY2025, 6% real placeholder.
+    # Fixtures fetched and committed 2026-08-13. This is shape (n), a real
+    # mid-window fiscal year end change (December 31 to November 30,
+    # effective calendar 2018, with an 11-month stub year) - run cold with
+    # fy_end_month=12 DELIBERATELY, the value that was correct until the
+    # change, so this fixture demonstrates check_fiscal_year_end() catching
+    # exactly the case it was built for: FY2017 through FY2025 all named,
+    # no crash.
+    cfg = rs.StudyConfig(
+        ticker='JEF', cik='0000096223', fy_end_month=12,
+        first_year=2013, last_year=2025, coe_longrun=0.06,
+        prices='jef_monthly.csv', traded_range='jef_traded_range.csv',
+        splits=[])
+    study, EE = rs.run(cfg, 'jef_sec_raw.json')
+    return study
+
 
 def drive_ba():
     # Boeing: FY2013-FY2025, 6% real placeholder. Fixtures fetched and
@@ -491,6 +508,10 @@ FLEET = [
     dict(ticker='BA', driver=drive_ba, tier='1 (run_study.py generic driver)',
          source='ba_monthly.csv/ba_traded_range.csv fetched and committed '
                 '2026-08-13 - see driver docstring; shape (h), suspended dividend'),
+    dict(ticker='JEF', driver=drive_jef, tier='1 (run_study.py generic driver)',
+         source='jef_monthly.csv/jef_traded_range.csv fetched and committed '
+                '2026-08-13 - see driver docstring; shape (n), mid-window fiscal '
+                'year end change'),
     dict(ticker='BKNG', driver=drive_bkng, tier='1 (run_study.py generic driver)',
          source='bkng_monthly.csv/bkng_traded_range.csv fetched and committed '
                 '2026-08-13; window/rate are this session\'s own choice, undocumented '
