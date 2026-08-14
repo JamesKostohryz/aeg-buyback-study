@@ -52,6 +52,7 @@ from buyback_study_TEMPLATE import (      # noqa: E402
     parse_concept, merge_concept_series, irr,
 )
 import timing_decomposition as td          # noqa: E402,F401
+from audit_points import run_audit_points, refused as _audit_refused  # noqa: E402
 
 UA = "AEG buyback study (james@jameskostohryz.com)"
 
@@ -894,6 +895,38 @@ def run(cfg, raw_path, fetch=False, csv_out=None):
 
     # The round trip is already inside report() above, and printing it twice
     # would invite a reader to treat two copies of one measure as two measures.
+
+    # ------------------------------------------------------- audit points
+    # The fifteen permanent checks (docs/00-PASTE-THIS-Hardening-Endpoint.md),
+    # run on every study forever, not just during hardening. See
+    # code/audit_points.py for what each one checks and what it would have
+    # caught. EE may be None (entry effect not struck at all) or missing keys
+    # audit_points.py expects; a safe stand-in keeps every check answerable
+    # (most as UNAVAILABLE) rather than crashing the driver on a company with
+    # no entry effect.
+    _EE_for_audit = EE if EE is not None else {
+        'tranches': [], 'excluded_years': {}, 'real_price_paid': {},
+        'real_eps': {}, 'per_year': {}, 'band': None, 'break_even': None,
+        'identity_residual': None, 'alt_total': None,
+        'families_disagree_on_sign': False, 'decomposition_note': None,
+    }
+    audit = run_audit_points(study, _EE_for_audit, traded_range=tr)
+    print("\n" + "=" * 100)
+    print("AUDIT POINTS (I1-I6 internal coherence, E1-E9 external coherence)")
+    print("=" * 100)
+    for code, r in audit.items():
+        print(f"  {code:<4}{r['status']:<13}{r['detail']}")
+        if r['status'] == 'FAIL':
+            note('REFUSAL', f"AUDIT POINT {code} FAILED: {r['detail']}")
+    if _audit_refused(audit):
+        failed = [c for c, r in audit.items() if r['status'] == 'FAIL']
+        print("=" * 100)
+        print(f"STUDY REFUSED: audit point(s) {', '.join(failed)} failed. Do not "
+              "publish this study until resolved, or until James overrides in "
+              "writing and the override is recorded in the output.")
+        note('REFUSAL', f"STUDY REFUSED by audit point(s) {', '.join(failed)} - "
+                        "see AUDIT POINTS above")
+    print("=" * 100)
 
     # -------------------------------------------------------------- closing
     for n in study.notes:
