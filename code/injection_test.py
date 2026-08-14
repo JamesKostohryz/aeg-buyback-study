@@ -337,6 +337,13 @@ GUARD_SIGNATURES = [
     "COMPENSATION WEDGE MISSING COMPONENT",
     "NO MEASURABLE REPURCHASE IN THIS WINDOW",
     "NOT A REPURCHASE PROGRAM",
+    # added 2026-08-13 (hardening-endpoint session, second pass) when these
+    # four guards were built directly in response to this suite's own
+    # findings on the first pass:
+    "DEFLATOR IMPLAUSIBLE",
+    "DIVIDEND SERIES PRESENT BUT EVERY VALUE IS ZERO",
+    "EPS INCONSISTENT WITH NET INCOME",
+    "SUSPICIOUSLY IDENTICAL ADJACENT YEARS",
 ]
 
 

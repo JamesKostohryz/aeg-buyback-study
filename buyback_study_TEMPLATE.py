@@ -2336,8 +2336,170 @@ class BuybackStudy:
                 'missing_components': missing_components,
                 'caveat': caveat}
 
+    # ------------------------------------------- injection-suite hardening
+    # Four checks added 2026-08-13 (hardening-endpoint session, second pass)
+    # after code/injection_test.py found the corruption it deliberately
+    # applies walks through with no guard at all. Each is additive - a new
+    # note, never a changed VALUE - so none of them can move a number in an
+    # existing study; that is what lets them land without re-proving the
+    # Apple byte-identical regeneration touches anything but its own text.
+    def validate_deflator(self):
+        """The deflator is a MULTIPLIER: nominal times this equals base-year
+        dollars, and it must get SMALLER as the fiscal year approaches today
+        - the earlier a dollar was earned, the more it must be scaled up to
+        reach today's price level. Nothing before this checked the
+        deflator's own plausibility; it was applied and trusted. A series
+        divided instead of multiplied downstream, or handed in already
+        inverted, still contains superficially plausible numbers - all
+        positive, all in a similar range - and closes every identity the
+        template checks while being wrong in every real-dollar figure it
+        touches.
+
+        Checked at the whole-window level, first year against last, rather
+        than year over year: a single year CAN legitimately rise on the
+        CPI's own disinflation (the committed engine series does, fiscal
+        2009 over fiscal 2008, 1.55652 to 1.56208) and a strict step-by-step
+        monotonicity requirement would misfire on that real data. A 2%
+        tolerance on the endpoint comparison absorbs it; the corruption this
+        guards against is not a 2% effect, it inverts the whole series.
+        """
+        ys = sorted(self.deflator)
+        bad_values = [y for y in ys if self.deflator[y] is None or self.deflator[y] <= 0]
+        if bad_values:
+            self.notes.append(
+                "DEFLATOR IMPLAUSIBLE: FY" +
+                ", FY".join(str(y) for y in bad_values) +
+                " carries a non-positive or missing multiplier, which cannot "
+                "be a base-year price-level ratio.")
+            return
+        if len(ys) >= 2:
+            first, last = ys[0], ys[-1]
+            if self.deflator[first] < self.deflator[last] * 0.98:
+                self.notes.append(
+                    f"DEFLATOR IMPLAUSIBLE: the multiplier for FY{first} "
+                    f"({self.deflator[first]:.4f}) is SMALLER than for FY{last} "
+                    f"({self.deflator[last]:.4f}). The convention is nominal "
+                    "times this equals base-year dollars, so the EARLIER year "
+                    "must carry the LARGER multiplier under any sustained "
+                    "inflation, and every window this template has studied has "
+                    "had one. This is the signature of a deflator applied "
+                    "backwards - divided instead of multiplied, or supplied "
+                    "already inverted - and every real-dollar figure in this "
+                    "report inherits it.")
+
+    def validate_dividend_series(self):
+        """DEFECT 15 (found on AutoZone) distinguishes a company that files
+        no dividend element at all (asserted a genuine zero, on evidence)
+        from a dividend series that was never fetched (refused). It does not
+        distinguish a THIRD case: a dividend element that IS filed, present
+        in `self.fin['dividends']`, where every value across the window
+        happens to be exactly zero. That looks identical to the genuine
+        no-dividend case to every method that reads it, but it was never
+        asserted as one - it is either a real, unusual fact about the
+        company (a program that pays nothing while still tagging the
+        element) or a data problem, and it is not this template's place to
+        assume which."""
+        d = self.fin.get('dividends')
+        if d and not getattr(self, 'dividends_are_zero', False):
+            vals = [d[y] for y in self.years() if y in d]
+            if vals and all(v == 0 for v in vals):
+                self.notes.append(
+                    "DIVIDEND SERIES PRESENT BUT EVERY VALUE IS ZERO: a "
+                    "dividend element IS filed - unlike the genuine "
+                    "no-dividend case, which files no element at all and is "
+                    "asserted as a fact, not inferred - yet every value across "
+                    "the window is exactly zero. Check this against the filing "
+                    "before anything downstream (the entity-level abnormal "
+                    "earnings growth recursion sums dividends and repurchase "
+                    "cash together) trusts it.")
+
+    def validate_eps_consistency(self, tolerance=0.03):
+        """Diluted earnings per share has a second, independent route: net
+        income divided by the weighted-average diluted share count, both of
+        which reach this template already restated onto today's split basis
+        (share counts are, everywhere else in this file). The two are not
+        expected to match exactly - preferred dividends, discontinued
+        operations and rounding all open small, real gaps - but a mismatch
+        of more than a few percent is not a rounding difference.
+
+        DEFECT 25 (found on Booking Holdings) fixed this for run_study.py's
+        own ingestion path: `split_factor()` is now applied to diluted EPS
+        there, from each fact's own filed date, the same way it already was
+        for share counts and prices. But `split_factor()` is applied to EPS
+        NOWHERE inside this file, and any driver that constructs a
+        BuybackStudy directly - as several already do - carries no defense
+        of its own if it hands in an EPS series that was never restated.
+        That is exactly what an as-filed EPS fact, read before a company's
+        own split, looks like: off from net income divided by weighted
+        shares by close to the split ratio. This is the second, independent
+        route this project's own audit-point philosophy calls for (I5):
+        it is computed here from net income and the share count, never by
+        calling `real_eps()` or trusting `diluted_eps` itself.
+        """
+        ni = self.fin.get('net_income', {})
+        eps = self.fin.get('diluted_eps', {})
+        wtd = self.fin.get('wtd_diluted_shares', {})
+        bad = []
+        for y in sorted(set(ni) & set(eps) & set(wtd)):
+            if not wtd.get(y) or eps.get(y) is None or ni.get(y) is None:
+                continue
+            implied = ni[y] / wtd[y]
+            if implied == 0:
+                continue
+            if abs(eps[y] / implied - 1.0) > tolerance:
+                bad.append((y, eps[y], implied))
+        if bad:
+            self.notes.append(
+                "EPS INCONSISTENT WITH NET INCOME / WEIGHTED SHARES: FY" +
+                ", FY".join(f"{y} (filed {e:.3f} vs implied {i:.3f})"
+                           for y, e, i in bad) +
+                f" - filed diluted EPS disagrees with net income divided by the "
+                f"weighted-average diluted share count by more than "
+                f"{100*tolerance:.0f}% in the year(s) named. Both are supposed "
+                "to be on today's split basis by the time they reach here; a "
+                "gap this size is the signature of an EPS series that was "
+                "never restated for a split and should not be trusted until "
+                "resolved.")
+
+    def validate_no_duplicated_years(self,
+            keys=('net_income', 'diluted_eps', 'operating_income',
+                  'wtd_diluted_shares')):
+        """A fiscal year's value copied exactly into the year beside it -
+        the signature of a copy-paste or a re-indexing error - reads as a
+        genuinely flat business to every identity this template checks, and
+        nothing before this looked for it. Exact equality between two
+        CONSECUTIVE fiscal years, to the precision these figures are filed
+        at, essentially never happens by coincidence in a real company's
+        reported net income, EPS, operating income or share count; when it
+        does, it is worth a person's look before anything downstream trusts
+        it. This is a NOTE, not a refusal - a truly flat year is possible
+        and only the filing can settle it, this template cannot.
+        """
+        hits = []
+        for key in keys:
+            s = self.fin.get(key) or {}
+            ys = sorted(s)
+            for a, b in zip(ys, ys[1:]):
+                if b == a + 1 and s[a] is not None and s[b] is not None \
+                        and s[a] == s[b] != 0:
+                    hits.append((key, a, b, s[a]))
+        if hits:
+            self.notes.append(
+                "SUSPICIOUSLY IDENTICAL ADJACENT YEARS: " +
+                "; ".join(f"{key} FY{a} and FY{b} are EXACTLY equal ({v:,.4f})"
+                         for key, a, b, v in hits) +
+                " - exact equality between consecutive fiscal years in a filed "
+                "dollar or per-share figure essentially never happens by "
+                "coincidence. This is the signature of a copy-paste or "
+                "re-indexing error, not asserted as one; check it against the "
+                "filing before trusting anything downstream.")
+
     # ----------------------------------------------------------------- run
     def run(self, traded_range=None):
+        self.validate_deflator()
+        self.validate_dividend_series()
+        self.validate_eps_consistency()
+        self.validate_no_duplicated_years()
         self.retired, self.issued = self.share_flows()
         self.price_failures = self.validate_prices(self.retired, traded_range)
         if self.price_failures:
