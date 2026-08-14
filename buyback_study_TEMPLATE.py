@@ -2457,28 +2457,46 @@ class BuybackStudy:
                     "earnings growth recursion sums dividends and repurchase "
                     "cash together) trusts it.")
 
-    def validate_eps_consistency(self, tolerance=0.03):
+    def validate_eps_consistency(self, tolerance=0.40):
         """Diluted earnings per share has a second, independent route: net
         income divided by the weighted-average diluted share count, both of
         which reach this template already restated onto today's split basis
-        (share counts are, everywhere else in this file). The two are not
-        expected to match exactly - preferred dividends, discontinued
-        operations and rounding all open small, real gaps - but a mismatch
-        of more than a few percent is not a rounding difference.
+        (share counts are, everywhere else in this file).
 
         DEFECT 25 (found on Booking Holdings) fixed this for run_study.py's
         own ingestion path: `split_factor()` is now applied to diluted EPS
-        there, from each fact's own filed date, the same way it already was
-        for share counts and prices. But `split_factor()` is applied to EPS
-        NOWHERE inside this file, and any driver that constructs a
-        BuybackStudy directly - as several already do - carries no defense
-        of its own if it hands in an EPS series that was never restated.
-        That is exactly what an as-filed EPS fact, read before a company's
-        own split, looks like: off from net income divided by weighted
-        shares by close to the split ratio. This is the second, independent
-        route this project's own audit-point philosophy calls for (I5):
-        it is computed here from net income and the share count, never by
+        there, from each fact's own filed date, the SAME way and to the
+        SAME degree it already was for share counts and prices - so on the
+        real production driver this check is defense in depth, not the
+        only line of defense, and that matters for the tolerance below. But
+        `split_factor()` is applied to EPS nowhere inside this file itself,
+        and any driver that constructs a BuybackStudy directly - as several
+        already do - carries no defense of its own if it hands in an EPS
+        series that was never restated. This is the second, independent
+        route this project's own audit-point philosophy calls for (I5): it
+        is computed here from net income and the share count, never by
         calling `real_eps()` or trusting `diluted_eps` itself.
+
+        THE TOLERANCE, AND WHY IT IS WIDE (2026-08-13, convergence batch
+        one). The first version of this check used 3% and fired on FOUR of
+        ten fresh companies with no split anywhere near their window -
+        NextEra Energy up to 28%, Walt Disney up to 30%, plus UnitedHealth
+        and Caterpillar at smaller magnitudes. All four have real
+        noncontrolling interests or other adjustments between consolidated
+        net income (this template's `net_income`, us-gaap:NetIncomeLoss)
+        and the income actually available to common shareholders, which is
+        diluted EPS's real numerator and is not always the same tag. That
+        is a genuine, ordinary GAAP fact, not a defect, and a check that
+        fires on it every time desensitizes a reader to the one time it
+        matters. 40% is comfortably above every legitimate gap observed
+        (worst: 30.3%, Walt Disney FY2023) and comfortably below the
+        smallest split this project has ever met (2-for-1, a 100% change).
+        KNOWN LIMIT: a genuinely small stock split - 5-for-4, 3-for-2 - if
+        combined with a future direct-construction driver that forgets to
+        restate EPS, could fall under 40% and slip past THIS check alone.
+        The production driver does not depend on this check for that case
+        (defect 25's fix restates EPS at ingestion regardless of ratio
+        size); a future direct-construction driver would.
         """
         ni = self.fin.get('net_income', {})
         eps = self.fin.get('diluted_eps', {})
